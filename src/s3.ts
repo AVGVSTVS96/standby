@@ -3,7 +3,7 @@ import type { Lease, Seen, Store } from "./lease"
 
 export type Bucket = { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string; key?: string }
 
-export function s3({ endpoint, bucket, accessKeyId, secretAccessKey, key = "lease.json" }: Bucket, cutOff: () => boolean): Store {
+export function s3({ endpoint, bucket, accessKeyId, secretAccessKey, key = "lease.json" }: Bucket, cutOff: () => boolean): Store & { remove(): Promise<void> } {
   const client = new AwsClient({ accessKeyId, secretAccessKey, service: "s3", region: "auto" })
   const url = `${endpoint.replace(/\/$/, "")}/${bucket}/${key}`
   const request = (init: RequestInit) => {
@@ -28,6 +28,9 @@ export function s3({ endpoint, bucket, accessKeyId, secretAccessKey, key = "leas
       if (!response.ok) throw new Error(`writing the lease: ${response.status}`)
       return response.headers.get("etag")!
     },
+    async remove() {
+      await request({ method: "DELETE" })
+    },
   }
 }
 
@@ -38,5 +41,6 @@ export async function enforcesConditions(bucket: Bucket): Promise<boolean> {
   const first = await probe.write(lease, null)
   const again = await probe.write(lease, null)
   const stale = await probe.write({ ...lease, beat: "2" }, '"0"')
+  await probe.remove()
   return first !== null && again === null && stale === null
 }

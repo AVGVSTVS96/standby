@@ -70,8 +70,8 @@ The database is three units in that target, ordered before the service: restore 
 Each machine builds a tagged release into a folder of that version's own, somewhere nothing syncs, and the units name the version:
 
 ```sh
-git clone --depth 1 --branch v0.1.0 https://github.com/AVGVSTVS96/standby ~/.local/share/standby/v0.1.0
-cd ~/.local/share/standby/v0.1.0 && bun install && bun test && bun run build
+git clone --depth 1 --branch v0.1.1 https://github.com/AVGVSTVS96/standby ~/.local/share/standby/v0.1.1
+cd ~/.local/share/standby/v0.1.1 && bun install && bun test && bun run build
 ```
 
 A half-saved edit can't go live, and moving to a new version is a change of the path in `standby.service`. Restarting standby on the holder restarts what it holds, on the same lease and tenure.

@@ -142,10 +142,11 @@ function overlaps(names: string[], after = 0) {
 
 /** Rows the old holder logged that the new holder's database lacks, and whether its tenures only ever go up. */
 async function carried(from: string, to: string) {
+  const wrote = rows(from)
   const db = await database(to)
   const have = new Set(db.map((row) => `${row.n} ${row.machine} ${row.tenure} ${row.at}`))
   const ordered = db.every((row, i) => i === 0 || row.tenure >= db[i - 1]!.tenure)
-  const missing = rows(from).filter((row) => !have.has(`${row.n} ${row.machine} ${row.tenure} ${row.at}`))
+  const missing = wrote.filter((row) => !have.has(`${row.n} ${row.machine} ${row.tenure} ${row.at}`))
   return { missing, ordered }
 }
 
@@ -273,6 +274,32 @@ const tests: Record<string, () => Promise<Result>> = {
     check(rows(other).length === 0, `${other} took over`)
     check(after.tenure === before.tenure, `the tenure went from ${before.tenure} to ${after.tenure}`)
     return { detail: `${holder} kept the lease and its tenure; its units went down with standby and came back`, ms: { gap: after.at - before.at } }
+  },
+
+  async "stray-start"() {
+    const { holder, other } = await started(["a", "b"])
+    const started_ = now()
+    const result = await as(other, "systemctl --user start toy.service db.service")
+    await sleep(3000)
+    check(now() - started_ < 8000, `starting a bound unit on the waiter took ${seconds(now() - started_)}`)
+    check((await active(other, "toy.service")) !== "active" && (await active(other, "db.service")) !== "active", `${other} runs its units without the lease`)
+    check(rows(other).length === 0 && writing(holder), `the lease moved`)
+    return { detail: `starting the units by hand on the waiter ${other} ${result.exitCode ? "fails" : "returns"} at once and runs nothing` }
+  },
+
+  async restart() {
+    const { holder, other } = await started(["a", "b"])
+    const since = now()
+    await as(holder, "systemctl --user restart standby.service")
+    await until(`${holder} to write again`, () => rows(holder).some((row) => row.at > since + 500), TTL * 2)
+    await sleep(3000)
+    const before = rows(holder).filter((row) => row.at <= since).at(-1)!
+    const after = rows(holder).find((row) => row.at > since + 500)!
+    check(rows(other).length === 0, `${other} took over`)
+    check(after.tenure === before.tenure, `the tenure went from ${before.tenure} to ${after.tenure}`)
+    const { missing } = await carried(holder, holder)
+    check(missing.length === 0, `${holder} lost ${missing.length} rows across its own restart`)
+    return { detail: `restarting standby on ${holder} (an update) restarts its units and keeps the lease, tenure and database`, ms: { gap: after.at - before.at } }
   },
 
   async hung() {

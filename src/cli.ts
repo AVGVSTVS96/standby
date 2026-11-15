@@ -80,7 +80,8 @@ const service: Service = {
   },
   async healthy() {
     const upheld = await words("show", "-p", "Upholds", "--value", unit)
-    return upheld.length === 0 || (await systemctl("is-active", ...upheld)).exitCode === 0
+    // is-active passes when any one unit is active, so each one's state is read.
+    return (await words("is-active", ...upheld)).every((state) => state === "active")
   },
   // The held file's time is the last renewal's, for a restarted standby to know its fence deadline.
   renewed(ago) {

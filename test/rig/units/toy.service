@@ -1,0 +1,13 @@
+[Unit]
+Description=Stands in for hex
+BindsTo=held.target
+After=held.target
+Requires=db.service
+After=db.service
+
+[Service]
+EnvironmentFile=%h/.config/standby.env
+EnvironmentFile=%t/standby/held
+ExecStart=/standby/test/rig/toy
+Restart=always
+RestartSec=1

@@ -1,0 +1,14 @@
+#!/bin/sh
+# Stands in for hex: a row a second, with this machine's name, the tenure and a counter, also logged outside the machine.
+# 16 MB of padding makes a restore take a moment, like a real database.
+set -eu
+[ ! -e "$HOME/broken" ] || { echo "toy: broken"; exit 1; }
+name=$(hostname)
+sqlite3 "$DB" "pragma journal_mode=wal; create table if not exists rows(n integer primary key, machine text, tenure int, at int);
+  create table if not exists pad(b); insert into pad select randomblob(16000000) where not exists (select 1 from pad);" >/dev/null
+while :; do
+  at=$(date +%s%3N)
+  n=$(sqlite3 -cmd ".timeout 5000" "$DB" "insert into rows(machine, tenure, at) values('$name', $TENURE, $at) returning n;")
+  echo "$n $name $TENURE $at" >> "/rig/log/$name.rows"
+  sleep 1
+done

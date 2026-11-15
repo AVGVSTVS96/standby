@@ -1,0 +1,8 @@
+[Unit]
+Description=A unit that ignores SIGTERM and may take 30 minutes to stop
+BindsTo=held.target
+After=held.target
+
+[Service]
+ExecStart=/bin/sh -c 'trap "" TERM; while :; do date +%%s%%3N >> /rig/log/$(hostname).stubborn; sleep 1; done'
+TimeoutStopSec=30min

@@ -1,10 +1,10 @@
 #!/usr/bin/env bun
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { join } from "node:path"
 import { $ } from "bun"
 import { run, type Service } from "./lease"
-import { enforcesConditions, s3 } from "./s3"
+import { enforcesConditions, s3, type Bucket } from "./s3"
 
 const home = process.env.HOME!
 const file = process.env.STANDBY_ENV ?? join(home, ".config/standby.env")
@@ -24,26 +24,43 @@ const exit = (why: string): never => {
 
 const name = settings.NAME ?? hostname()
 const unit = need("UNIT")
-const bucket = {
-  endpoint: need("ENDPOINT"),
-  bucket: need("BUCKET"),
-  accessKeyId: need("AWS_ACCESS_KEY_ID"),
-  secretAccessKey: need("AWS_SECRET_ACCESS_KEY"),
-}
+const ttl = seconds("TTL", 60)
 const runtime = join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "standby")
 const held = join(runtime, "held")
 const drill = join(runtime, "drill")
-const store = s3(bucket, () => existsSync(drill))
+// Only what talks to the bucket needs its settings: the fence must work without them.
+let bucket: Bucket | undefined
+const settingsOfBucket = () =>
+  (bucket ??= { endpoint: need("ENDPOINT"), bucket: need("BUCKET"), accessKeyId: need("AWS_ACCESS_KEY_ID"), secretAccessKey: need("AWS_SECRET_ACCESS_KEY") })
+let opened: ReturnType<typeof s3> | undefined
+const store = () => (opened ??= s3(settingsOfBucket(), () => existsSync(drill)))
 const systemctl = (...args: string[]) => $`systemctl --user ${args}`.nothrow().quiet()
 const hook = (command: string | undefined, env: Record<string, string> = {}) =>
   command ? Bun.spawn(["sh", "-c", command], { env: { ...process.env, ...env }, stdio: ["ignore", "inherit", "inherit"] }).exited : undefined
+const words = async (...args: string[]) => (await systemctl(...args).text()).split(/\s+/).filter(Boolean)
 
-/** Everything bound to the target goes at once: a unit's own stop could outlast the lease. */
+/**
+ * Everything bound to the target goes at once: a unit's own stop could outlast the lease. The held file goes last, as
+ * it's what tells the fence there's something to stop.
+ */
 async function stopNow() {
-  rmSync(held, { force: true })
-  const bound = (await systemctl("show", "-p", "BoundBy", "--value", unit).text()).split(/\s+/).filter(Boolean)
+  const bound = await words("show", "-p", "BoundBy", "--value", unit)
   await systemctl("stop", "--no-block", unit)
   if (bound.length) await systemctl("kill", "--signal=KILL", ...bound)
+  rmSync(held, { force: true })
+}
+
+/** systemd is restarting this standby (an update), rather than stopping it: it says so in the job it runs. */
+async function restarting() {
+  const self = readFileSync("/proc/self/cgroup", "utf8").trim().split("/").at(-1)!
+  return (await words("list-jobs", "--no-legend", self))[2] === "restart"
+}
+
+/** The tenure the run before this one held, if what it held still runs, and how long its last renewal lets it run on. */
+async function inherited() {
+  if (!existsSync(held) || (await systemctl("is-active", "-q", unit)).exitCode !== 0) return undefined
+  const tenure = Number(readFileSync(held, "utf8").match(/^TENURE=(\d+)$/m)?.[1])
+  return tenure ? { tenure, within: statSync(held).mtimeMs + (ttl * 2) / 3 - Date.now() } : undefined
 }
 
 const service: Service = {
@@ -53,6 +70,7 @@ const service: Service = {
     await systemctl("start", "--no-block", unit)
   },
   async stop() {
+    await systemctl("stop", "--no-block", unit)
     rmSync(held, { force: true })
     await systemctl("stop", unit)
   },
@@ -61,16 +79,23 @@ const service: Service = {
     await stopNow()
   },
   async healthy() {
-    const required = (await systemctl("show", "-p", "Requires", "--value", unit).text()).split(/\s+/).filter(Boolean)
-    return required.length === 0 || (await systemctl("is-active", ...required)).exitCode === 0
+    const upheld = await words("show", "-p", "Upholds", "--value", unit)
+    return upheld.length === 0 || (await systemctl("is-active", ...upheld)).exitCode === 0
+  },
+  // The held file's time is the last renewal's, for a restarted standby to know its fence deadline.
+  renewed(ago) {
+    const at = new Date(Date.now() - ago)
+    if (existsSync(held)) utimesSync(held, at, at)
   },
 }
 
 const commands: Record<string, () => Promise<void>> = {
   async run() {
-    if (!(await enforcesConditions(bucket))) exit("standby: this bucket doesn't enforce conditional writes, so two machines could both win the lease")
+    if (!(await enforcesConditions(settingsOfBucket()))) exit("standby: this bucket doesn't enforce conditional writes, so two machines could both win the lease")
     mkdirSync(runtime, { recursive: true })
-    rmSync(held, { force: true })
+    const before = await inherited()
+    if (before) console.log(`standby: ${name} restarted holding tenure ${before.tenure}, which keeps running while it renews the lease`)
+    else rmSync(held, { force: true })
     const started = { clock: performance.now(), wall: Date.now() }
     // systemd kills a standby that stops answering, and ExecStopPost takes down what it held.
     const watchdog = Number(process.env.WATCHDOG_USEC ?? 0) / 1000
@@ -81,16 +106,18 @@ const commands: Record<string, () => Promise<void>> = {
     process.on("SIGUSR2", () => void (move = "away"))
     for (const signal of ["SIGTERM", "SIGINT"] as const) {
       process.on(signal, async () => {
-        // A machine going down passes the lease on first; a plain restart keeps it and takes it straight back.
-        const goingDown = (await $`systemctl is-system-running`.nothrow().text()).trim() === "stopping"
-        if (!goingDown) process.exit(0)
-        stopping = true
+        // A restart leaves what it holds running, for the next run to renew; a machine going down passes the lease on
+        // first; a plain stop stops what it holds and lets the lease run out. A waiter holds nothing to stop.
+        if (await restarting()) process.exit(0)
+        if ((await $`systemctl is-system-running`.nothrow().text()).trim() === "stopping") return void (stopping = true)
+        if (existsSync(held)) await service.stop()
+        process.exit(0)
       })
     }
     await run(
-      { name, ttl: seconds("TTL", 60), home: settings.HOME_MACHINE === "1", stable: seconds("STABLE", 300), unhealthy: seconds("UNHEALTHY", 120) },
+      { name, ttl, home: settings.HOME_MACHINE === "1", stable: seconds("STABLE", 300), unhealthy: seconds("UNHEALTHY", 120), inherited: before },
       {
-        store,
+        store: store(),
         service,
         // A suspended machine's monotonic clock stands still, so the wall clock counts too.
         now: () => Math.max(performance.now() - started.clock, Date.now() - started.wall),
@@ -108,27 +135,50 @@ const commands: Record<string, () => Promise<void>> = {
       },
     )
   },
-  /** Makes the lease, once, held by this machine: `standby init [tenure]`, the tenure only when replacing a lease that was lost. */
+  /**
+   * Makes the lease, held by this machine, whose database is the one kept: once, or after `standby retire`, at the tenure
+   * after the retired one. `standby init [tenure]` sets the tenure when replacing a lease that was lost.
+   */
   async init() {
-    const made = await store.write({ holder: name, tenure: Number(process.argv[3] ?? 1), beat: crypto.randomUUID() }, null)
-    console.log(made ? `standby: ${name} holds the new lease` : "standby: there is a lease already")
+    const seen = await store().read()
+    if (seen && !seen.lease.retired) return console.log("standby: there is a lease already")
+    const tenure = seen ? seen.lease.tenure + 1 : Number(process.argv[3] ?? 1)
+    const made = await store().write({ holder: name, tenure, beat: crypto.randomUUID() }, seen?.etag ?? null)
+    if (!made) exit("standby: the lease changed meanwhile, so none was made")
+    console.log(`standby: ${name} holds the new lease, tenure ${tenure}`)
+  },
+  /** Takes the lease out of use: its holder stops at its next renewal, and no machine takes it until `standby init`. */
+  async retire() {
+    const seen = await store().read()
+    if (!seen || seen.lease.retired) return console.log("standby: no lease is in use")
+    const { claim: _, ...lease } = seen.lease
+    if (!(await store().write({ ...lease, retired: true, beat: crypto.randomUUID() }, seen.etag))) exit("standby: the lease changed meanwhile, so it wasn't retired")
+    console.log(`standby: retired the lease at tenure ${lease.tenure}`)
   },
   async status() {
-    const seen = await store.read()
+    const seen = await store().read()
     if (!seen) return console.log("no lease: `standby init` on the machine that should hold it makes one")
-    const { holder, tenure, free, claim } = seen.lease
+    const { holder, tenure, free, claim, retired } = seen.lease
+    if (retired) return console.log(`retired at tenure ${tenure}: \`standby init\` makes the next`)
     console.log(`${free ? `free (last held by ${holder})` : holder} · tenure ${tenure}${claim ? ` · ${claim} asked for it` : ""}${existsSync(held) ? " · held here" : ""}`)
   },
   async move() {
     if (!existsSync(held)) exit(`standby: ${name} doesn't hold the lease`)
     await systemctl("kill", `--signal=${process.argv[3] === "--away" ? "USR2" : "USR1"}`, "standby.service")
   },
-  /** After standby.service exits, however it went. */
-  fence: stopNow,
+  /**
+   * After standby.service exits, however it went: what it held stops, unless systemd is restarting it. A standby that
+   * never held, or already stopped what it held, leaves the units alone: they may be another setup's.
+   */
+  async fence() {
+    if (!existsSync(held)) return
+    if (process.env.SERVICE_RESULT === "success" && (await restarting())) return
+    await stopNow()
+  },
   async drill() {
     if (process.argv[3] === "off") rmSync(drill, { force: true })
     else writeFileSync(drill, "")
   },
 }
 
-await (commands[process.argv[2] ?? ""] ?? (() => exit("usage: standby run | init [tenure] | status | move [--away] | drill [off]")))()
+await (commands[process.argv[2] ?? ""] ?? (() => exit("usage: standby run | init [tenure] | retire | status | move [--away] | drill [off]")))()

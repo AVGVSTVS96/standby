@@ -6,6 +6,8 @@ After=network-online.target
 ExecStart=%h/.local/share/standby/standby run
 ExecStopPost=-%h/.local/share/standby/standby fence
 RuntimeDirectory=standby
+# A restart keeps the held file, so the next run knows what still runs and renews its tenure.
+RuntimeDirectoryPreserve=restart
 Restart=always
 RestartSec=2
 WatchdogSec=5

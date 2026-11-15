@@ -6,6 +6,8 @@ export type Lease = {
   claim?: string
   /** A machine this tenure's holder took over from that died or was going down: what ran there needs carrying on. */
   left?: string
+  /** Out of use (`standby retire`): no machine takes it until `standby init` makes the next tenure. */
+  retired?: true
   beat: string
 }
 
@@ -24,6 +26,8 @@ export interface Service {
   stop(): Promise<void>
   kill(why: string): Promise<void>
   healthy(): Promise<boolean>
+  /** The holder renewed the lease with a write sent `ago` ms before: what it runs may keep running until 2/3 TTL after that write. */
+  renewed(ago: number): void
 }
 
 export type Config = {
@@ -32,6 +36,8 @@ export type Config = {
   home: boolean
   stable: number
   unhealthy: number
+  /** What the run before this one held is still running (standby restarted, as for an update): its tenure, and how long until its fence deadline. */
+  inherited?: { tenure: number; within: number }
 }
 
 export type Deps = {
@@ -59,11 +65,12 @@ export async function run(config: Config, deps: Deps): Promise<void> {
   let failures = 0
   let last = ""
 
+  const key = (lease: Lease, mine: boolean) => `${lease.holder} ${lease.tenure} ${lease.free ?? ""} ${mine}`
   const changed = (lease: Lease, mine: boolean, lost?: Lost) => {
-    const key = `${lease.holder} ${lease.tenure} ${lease.free ?? ""} ${mine}`
-    if (key !== last) deps.onChange(lease, mine, lost)
-    last = key
+    if (key(lease, mine) !== last) deps.onChange(lease, mine, lost)
+    last = key(lease, mine)
   }
+  const ours = (lease: Lease, tenure: number) => lease.holder === name && lease.tenure === tenure && !lease.free && !lease.retired
   const write = (lease: Omit<Lease, "beat">, etag: string | null) => {
     const next = { ...lease, beat: deps.beat() }
     const sent = now()
@@ -72,9 +79,43 @@ export async function run(config: Config, deps: Deps): Promise<void> {
   const take = (lease: Omit<Lease, "beat">, etag: string | null) => write(lease, etag).catch(() => null)
   const succeed = ({ tenure }: Lease) => ({ holder: name, tenure: tenure + 1, from: tenure })
 
+  if (config.inherited) await resume(config.inherited)
   while (!deps.stopping()) {
     const held = await wait()
     if (held) await hold(held)
+  }
+
+  /** Renews the tenure the run before held, leaving what runs untouched, or fences it by the deadline that run's last renewal set. */
+  async function resume({ tenure, within }: { tenure: number; within: number }): Promise<void> {
+    const deadline = now() + within
+    let over = false
+    const fence = async (why: string) => {
+      if (over) return
+      over = true
+      await service.kill(why)
+    }
+    void (async () => {
+      while (!over && now() < deadline) await sleep(1000)
+      await fence("no renewal since standby restarted")
+    })()
+    while (!over) {
+      const seen = await store.read().catch(() => undefined)
+      if (over) return
+      if (seen === undefined) {
+        await sleep(poll(ttl))
+        continue
+      }
+      if (!seen || !ours(seen.lease, tenure)) return fence(`the lease went to ${seen?.lease.holder ?? "nobody"} while standby restarted`)
+      const won = await take(seen.lease, seen.etag)
+      if (over) return
+      if (!won) {
+        await sleep(poll(ttl))
+        continue
+      }
+      over = true
+      last = key(won.lease, true)
+      return hold(won)
+    }
   }
 
   async function wait(): Promise<Won | null> {
@@ -90,8 +131,9 @@ export async function run(config: Config, deps: Deps): Promise<void> {
         continue
       }
       reached = now()
-      // A lease is made once, by hand (`standby init`): one that went missing must not start again at tenure 1.
-      if (!seen) {
+      // A lease is made once, by hand (`standby init`): one that went missing must not start again at tenure 1, and a
+      // retired one waits for init too.
+      if (!seen || seen.lease.retired) {
         await sleep(poll(ttl))
         continue
       }
@@ -169,10 +211,10 @@ export async function run(config: Config, deps: Deps): Promise<void> {
       }
       if (written) {
         ;({ lease, etag, sent: renewed } = written)
+        service.renewed(now() - renewed)
       } else if (written === null) {
         const current = await store.read().catch(() => undefined)
-        const mine = current && current.lease.holder === name && current.lease.tenure === lease.tenure && !current.lease.free
-        if (mine) ({ lease, etag } = current)
+        if (current && ours(current.lease, lease.tenure)) ({ lease, etag } = current)
         else if (current !== undefined) return fence(`the lease went to ${current?.lease.holder ?? "nobody"}`)
       }
       const rest = sleep(written ? ttl / 6 : 1000)

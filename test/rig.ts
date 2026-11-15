@@ -289,18 +289,59 @@ const tests: Record<string, () => Promise<Result>> = {
   },
 
   async restart() {
+    const { holder, other } = await started(["a", "b"], { stubborn: true })
+    const pids = async () => (await as(holder, "systemctl --user show -p MainPID --value toy.service db.service stubborn.service").text()).trim()
+    const before = await pids()
+    const since = now()
+    // An update: the unit names the next version's folder, and standby restarts on it.
+    await as(holder, `mkdir -p $HOME/.local/share/standby/next && cp $HOME/.local/share/standby/standby $HOME/.local/share/standby/next/standby &&
+      sed -i 's|/standby/standby |/standby/next/standby |' $HOME/.config/systemd/user/standby.service && systemctl --user daemon-reload && systemctl --user restart standby.service`)
+    await sleep(TTL)
+    const after = await pids()
+    const gap = Math.max(...rows(holder).filter((row) => row.at > since - 1500).map((row, i, all) => (i ? row.at - all[i - 1]!.at : 0)))
+    check((await as(holder, "ps -o args= -p $(systemctl --user show -p MainPID --value standby.service)").text()).includes("next/standby"), "standby didn't restart on the next version")
+    check(after === before, `the units restarted with standby: ${before.replace(/\n/g, " ")} → ${after.replace(/\n/g, " ")}`)
+    check(rows(other).length === 0, `${other} took over`)
+    check(new Set(rows(holder).map((row) => row.tenure)).size === 1, "the tenure changed")
+    return { detail: `updating standby on ${holder} restarts standby alone: the toy, its database's stream and the stubborn unit run on, on the same tenure`, ms: { "longest gap between rows": gap } }
+  },
+
+  async "toy-restart"() {
+    const { holder } = await started(["a", "b"], { stubborn: true })
+    const others = async () => (await as(holder, "systemctl --user show -p MainPID --value db.service stubborn.service standby.service").text()).trim()
+    const before = await others()
+    await as(holder, "systemctl --user restart toy.service")
+    await sleep(3000)
+    check((await others()) === before, `restarting the toy restarted others: ${before} → ${await others()}`)
+    check(writing(holder), `${holder}'s toy didn't come back`)
+    return { detail: "restarting the held service (an update of it) restarts it alone" }
+  },
+
+  async stop() {
     const { holder, other } = await started(["a", "b"])
     const since = now()
-    await as(holder, "systemctl --user restart standby.service")
-    await until(`${holder} to write again`, () => rows(holder).some((row) => row.at > since + 500), TTL * 2)
-    await sleep(3000)
-    const before = rows(holder).filter((row) => row.at <= since).at(-1)!
-    const after = rows(holder).find((row) => row.at > since + 500)!
-    check(rows(other).length === 0, `${other} took over`)
-    check(after.tenure === before.tenure, `the tenure went from ${before.tenure} to ${after.tenure}`)
+    await as(holder, "systemctl --user stop standby.service")
+    const stopped = now()
+    check((await active(holder, "held.target")) !== "active" && (await active(holder, "toy.service")) !== "active", `${holder}'s units still run after standby stopped`)
+    const { move } = await handover(holder, other, since, "planned", TTL * 4)
+    return { detail: `stopping standby on ${holder} stops its units, and ${other} takes the lease once it runs out`, ms: { "stop took": stopped - since, "last row to first on the new": move } }
+  },
+
+  async retire() {
+    const { holder, other } = await started(["a", "b"])
+    const since = now()
+    check((await standby(other, "retire")).exitCode === 0, "standby retire failed")
+    await sleep(TTL * 3)
+    const last = rows(holder).at(-1)!
+    check(last.at - since < TTL, `${holder} ran ${seconds(last.at - since)} after the lease was retired`)
+    check(rows(other).length === 0, `${other} took a retired lease`)
+    const { tenure } = last
+    const init = await standby(holder, "init")
+    check(init.exitCode === 0, `init after retire failed: ${init.stderr}`)
+    await until(`${holder} to write again`, () => rows(holder).some((row) => row.at > now() - 1000 && row.tenure === tenure + 1), TTL * 2)
     const { missing } = await carried(holder, holder)
-    check(missing.length === 0, `${holder} lost ${missing.length} rows across its own restart`)
-    return { detail: `restarting standby on ${holder} (an update) restarts its units and keeps the lease, tenure and database`, ms: { gap: after.at - before.at } }
+    check(missing.length === 0, `${holder} lost ${missing.length} rows across retire and init`)
+    return { detail: `${holder} stopped ${seconds(last.at - since)} after the lease was retired, nobody took it for ${seconds(TTL * 3)}, and init on ${holder} made tenure ${tenure + 1} with its database kept` }
   },
 
   async hung() {

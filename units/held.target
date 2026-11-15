@@ -4,9 +4,9 @@
 #   BindsTo=held.target
 #   After=held.target
 # so it can't start without the lease, stops before standby passes it on, and is killed the moment it's lost.
-# List here, as Requires=, what must be up for this machine to keep the lease.
+# List here, as Upholds=, what must be up for this machine to keep the lease: systemd starts it again whenever it's down.
+# Nothing here depends on standby.service but its order, so a reload or a restart of standby (an update) stops nothing.
 [Unit]
 Description=What runs on the one machine that holds the lease
-BindsTo=standby.service
 After=standby.service
 ConditionPathExists=%t/standby/held

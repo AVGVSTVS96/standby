@@ -21,12 +21,12 @@ The lease is one small object in S3-compatible storage. Only one machine can win
 
 ## The lease
 
-`lease.json`: `{ holder, tenure, claim?, beat }`. Every write is a compare-and-swap on the object's ETag (`If-Match`), and carries a random `beat`, since a store may give identical bodies identical ETags. The lease is made once, by `standby init` on the machine that should hold it: a lease that went missing is never started again at tenure 1 by itself.
+`lease.json`: `{ holder, tenure, from?, free?, claim?, left?, retired?, beat }`. Every write is a compare-and-swap on the object's ETag (`If-Match`), and carries a random `beat`, since a store may give identical bodies identical ETags. The lease is made once, by `standby init` on the machine that should hold it: a lease that went missing is never started again at tenure 1 by itself. `standby retire` takes it out of use: its holder stops at its next renewal, no waiter takes it, and the next `standby init` makes the tenure after it.
 
 - **Holding.** The holder rewrites the lease every `TTL/6`. If no write has succeeded for `2/3 TTL`, or a write comes back 412 and the lease now names someone else, it stops being the holder at once. Both the monotonic and the wall clock count, so a machine that slept or froze knows.
 - **Waiting.** A waiter reads the lease every `TTL/60` (reads are cheap, and it takes a passed lease within a second). Once it has seen the same ETag for a full `TTL` on its own clock, the holder is gone and the waiter writes itself in. No clocks are compared between machines.
 - **Tenure** goes up by one each time the holder changes. It names the database's replica path, `db/<tenure>`, so a machine that froze and woke after losing the lease can only write where nobody reads.
-- **Passing it on.** A holder that is shutting down, was told to move (`standby move`), or can't keep its service up for `UNHEALTHY` seconds, stops the service and writes the next holder in: the machine in `claim`, or nobody. One that gave up on its service then sits out `STABLE`, doubled for each tenure in a row it gave up (up to 16 times), so a machine that can't run the service doesn't keep taking it back.
+- **Passing it on.** A holder that is shutting down, was told to move (`standby move`), or can't keep what its target `Upholds=` up for `UNHEALTHY` seconds, stops the service and writes the next holder in: the machine in `claim`, or nobody. One that gave up on its service then sits out `STABLE`, doubled for each tenure in a row it gave up (up to 16 times), so a machine that can't run the service doesn't keep taking it back.
 - **Home.** A machine with `HOME_MACHINE=1` that has waited healthily for `STABLE` seconds writes its name into `claim`. The holder sees it at its next renewal and passes the lease on.
 
 ## systemd is the state
@@ -36,9 +36,10 @@ The lease is one small object in S3-compatible storage. Only one machine can win
 ```ini
 # your.target
 [Unit]
-BindsTo=standby.service
 After=standby.service
 ConditionPathExists=%t/standby/held
+# What must be up to keep the lease: systemd starts it again whenever it's down, and standby passes the lease on when it can't.
+Upholds=your.service
 ```
 
 Everything that must run on one machine binds to that target, in a drop-in:
@@ -47,15 +48,20 @@ Everything that must run on one machine binds to that target, in a drop-in:
 [Unit]
 BindsTo=your.target
 After=your.target
+ConditionPathExists=%t/standby/held
 ```
 
-So nothing starts it without the lease, it stops before standby passes the lease on (and before standby itself, when the machine goes down), and when the lease is lost standby kills it outright, whatever its own stop would take. When standby itself dies or hangs (`WatchdogSec`), `ExecStopPost` does the same. There is no holder file and no start-up check to pass or skip: a unit is up because the lease is held.
+So nothing starts it without the lease, it stops before standby passes the lease on (and before standby itself, when the machine goes down), and when the lease is lost standby kills it outright, whatever its own stop would take. When standby itself dies or hangs (`WatchdogSec`), `ExecStopPost` (`standby fence`) does the same, if it held the lease. A unit is up because the lease is held.
+
+The target is only ordered after standby, never bound to it, and nothing in it depends on another unit's restart: a `daemon-reload`, a restart of standby or of one service in the target, stops nothing else. systemd stops what is bound to a target that is inactive at a reload, so a target with units bound to it is never left inactive while they run.
+
+**Restarting standby** (an update: `systemctl restart`, `RuntimeDirectoryPreserve=restart` keeps the held file) leaves what it holds running. The new run renews the same tenure; if it can't within `2/3 TTL` of the last renewal, it stops everything as a lost lease would. A plain `systemctl stop` stops what it holds and lets the lease run out.
 
 The database is three units in that target, ordered before the service: restore (`db/<FROM>`, skipped when this disk ran that tenure or this one; what a disk wrote that never reached the bucket is kept beside it as `<db>.ran-<tenure>`), `litestream replicate` to `db/<TENURE>`, then the service, which stops first so its last writes are streamed.
 
 ## One hook
 
-`ON_CHANGE` runs whenever the lease this machine sees changes, with `HOLDER`, `TENURE` and `MINE` in its environment. Notifications, DNS names, resizing a cloud machine before it takes over (`BEFORE_HOLD`) live there, outside standby.
+`ON_CHANGE` runs whenever the lease this machine sees changes, with `HOLDER`, `TENURE` and `MINE` in its environment, `LEFT` (a machine that went down or to sleep holding it) and `LOST` (how this machine stopped holding it: `passed`, `left` or `fenced`). Notifications, DNS names, resizing a cloud machine before it takes over (`BEFORE_HOLD`) live there, outside standby.
 
 ## Settings
 
@@ -63,18 +69,18 @@ The database is three units in that target, ordered before the service: restore 
 
 ## Commands
 
-`standby run` (the service) · `standby init [tenure]` (make the lease, once) · `standby status` · `standby move` (pass the lease on now) · `standby drill [off]` (act cut off from the bucket, to rehearse an outage without one).
+`standby run` (the service) · `standby init [tenure]` (make the lease, once, or after a retire) · `standby retire` (take it out of use) · `standby status` · `standby move` (pass the lease on now) · `standby drill [off]` (act cut off from the bucket, to rehearse an outage without one).
 
 ## Install
 
 Each machine builds a tagged release into a folder of that version's own, somewhere nothing syncs, and the units name the version:
 
 ```sh
-git clone --depth 1 --branch v0.1.1 https://github.com/AVGVSTVS96/standby ~/.local/share/standby/v0.1.1
-cd ~/.local/share/standby/v0.1.1 && bun install && bun test && bun run build
+git clone --depth 1 --branch v0.2.0 https://github.com/AVGVSTVS96/standby ~/.local/share/standby/v0.2.0
+cd ~/.local/share/standby/v0.2.0 && bun install && bun test && bun run build
 ```
 
-A half-saved edit can't go live, and moving to a new version is a change of the path in `standby.service`. Restarting standby on the holder restarts what it holds, on the same lease and tenure.
+A half-saved edit can't go live, and moving to a new version is a change of the path in `standby.service` and a restart, which leaves what the holder runs running.
 
 ## Proof
 

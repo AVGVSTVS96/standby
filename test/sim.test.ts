@@ -29,8 +29,10 @@ function world(seed: number, names: string[]) {
     tenureRuns: number
     move: boolean
     broken: boolean
+    /** When its standby last renewed the lease: a restarted standby may let what runs go on until 2/3 TTL after it. */
+    renewed: number
   }
-  const machines = names.map<Machine>((name) => ({ name, frozenUntil: 0, cutUntil: 0, running: false, generation: 0, move: false, broken: false, tenureRuns: 0 }))
+  const machines = names.map<Machine>((name) => ({ name, frozenUntil: 0, cutUntil: 0, running: false, generation: 0, move: false, broken: false, tenureRuns: 0, renewed: 0 }))
   const log: string[] = []
   const say = (text: string) => log.push(`${(time / 1000).toFixed(1).padStart(8)}s ${text}`)
 
@@ -85,6 +87,7 @@ function world(seed: number, names: string[]) {
             machine.running = true
             machine.tenureRuns++
             machine.tenure = held.tenure
+            machine.renewed = time
             say(`${machine.name} runs tenure ${held.tenure}`)
           },
           // systemd runs jobs in order: a stop asked before the latest start doesn't undo it.
@@ -99,6 +102,9 @@ function world(seed: number, names: string[]) {
             say(`${machine.name} fenced: ${why}`)
           },
           healthy: async () => !machine.broken,
+          renewed: (ago) => {
+            if (alive()) machine.renewed = time - ago
+          },
         },
       },
     ).catch((error) => say(`${machine.name} crashed: ${error}`))
@@ -110,6 +116,25 @@ function world(seed: number, names: string[]) {
     machine.running = false
     say(`${machine.name} restarts`)
     timers.push({ at: time + 1000 + random() * 20_000, order: order++, machine, fire: () => boot(machine) })
+  }
+
+  /**
+   * What systemd does when standby is restarted for an update: what it held keeps running, and the next run starts
+   * after up to 20s (TimeoutStartSec bounds a start that hangs, and ExecStopPost then fences).
+   */
+  function update(machine: Machine) {
+    machine.generation++
+    say(`${machine.name} updates`)
+    const delay = random() < 0.2 ? random() * 20_000 : 200 + random() * 2000
+    timers.push({
+      at: time + delay,
+      order: order++,
+      machine,
+      fire: () => {
+        const within = machine.renewed + (TTL * 2) / 3 - time
+        boot(machine, machine.running && machine.tenure !== undefined ? { inherited: { tenure: machine.tenure, within } } : {})
+      },
+    })
   }
 
   const active = () => machines.filter((m) => m.running && time >= m.frozenUntil)
@@ -142,7 +167,8 @@ function world(seed: number, names: string[]) {
         } else if (kind < 0.6) {
           machine.cutUntil = time + random() * 200_000
           say(`${machine.name} is cut off`)
-        } else if (kind < 0.8) restart(machine)
+        } else if (kind < 0.7) restart(machine)
+        else if (kind < 0.8) update(machine)
         else if (kind < 0.9) machine.move = machine.running
         else machine.broken = !machine.broken
       }
@@ -151,7 +177,7 @@ function world(seed: number, names: string[]) {
   }
 
   for (const machine of machines) boot(machine)
-  return { until, active, machines, log, time: () => time, lease: () => stored?.lease, restart }
+  return { until, active, machines, log, time: () => time, lease: () => stored?.lease, restart, update, retire: () => stored && (stored = { ...stored, lease: { ...stored.lease, retired: true }, etag: `e${++writes}` }) }
 }
 
 test("never two holders, through freezes, cut connections, restarts and moves", async () => {
@@ -193,4 +219,27 @@ test("a holder that restarts keeps its tenure, so it keeps its database", async 
   await w.until(w.time() + 60_000, false)
   expect(w.active()).toHaveLength(1)
   expect(w.lease()!.tenure).toBe(tenure)
+})
+
+test("a holder whose standby restarts for an update keeps running, on the same tenure", async () => {
+  const w = world(11, ["server", "twin"])
+  await w.until(120_000, false)
+  const holder = w.active()[0]!
+  const { tenure } = w.lease()!
+  const runs = holder.tenureRuns
+  w.update(holder)
+  await w.until(w.time() + 120_000, false)
+  expect(w.active()).toEqual([holder])
+  expect(w.lease()).toMatchObject({ holder: holder.name, tenure })
+  expect(holder.tenureRuns).toBe(runs + 1)
+  expect(w.log.some((line) => line.includes("fenced"))).toBe(false)
+})
+
+test("a retired lease stops its holder and no machine takes it", async () => {
+  const w = world(5, ["server", "twin"])
+  await w.until(120_000, false)
+  w.retire()
+  await w.until(w.time() + 600_000, false)
+  expect(w.active()).toEqual([])
+  expect(w.lease()?.retired).toBe(true)
 })

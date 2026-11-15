@@ -1,9 +1,10 @@
 # The target standby starts while this machine holds the lease (UNIT in standby.env). Copy it under your own name.
 # Each unit that must run on one machine only gets, in a drop-in:
 #   [Unit]
-#   PartOf=held.target
-#   ConditionPathExists=%t/standby/held
-# and is listed here: Requires= for what must be up for this machine to keep the lease, Wants= for the rest.
+#   BindsTo=held.target
+#   After=held.target
+# so it can't start without the lease, stops before standby passes it on, and is killed the moment it's lost.
+# List here, as Requires=, what must be up for this machine to keep the lease.
 [Unit]
 Description=What runs on the one machine that holds the lease
 BindsTo=standby.service

@@ -36,7 +36,15 @@ const drill = join(runtime, "drill")
 const store = s3(bucket, () => existsSync(drill))
 const systemctl = (...args: string[]) => $`systemctl --user ${args}`.nothrow().quiet()
 const hook = (command: string | undefined, env: Record<string, string> = {}) =>
-  command ? $`sh -c ${command}`.env({ ...process.env, ...env }).nothrow() : undefined
+  command ? Bun.spawn(["sh", "-c", command], { env: { ...process.env, ...env }, stdio: ["ignore", "inherit", "inherit"] }).exited : undefined
+
+/** Everything bound to the target goes at once: a unit's own stop could outlast the lease. */
+async function stopNow() {
+  rmSync(held, { force: true })
+  const bound = (await systemctl("show", "-p", "BoundBy", "--value", unit).text()).split(/\s+/).filter(Boolean)
+  await systemctl("stop", "--no-block", unit)
+  if (bound.length) await systemctl("kill", "--signal=KILL", ...bound)
+}
 
 const service: Service = {
   async start({ tenure, from, left }) {
@@ -50,10 +58,7 @@ const service: Service = {
   },
   async kill(why) {
     console.error(`standby: ${name} lost the lease (${why})`)
-    rmSync(held, { force: true })
-    await systemctl("stop", "--no-block", unit)
-    const parts = (await systemctl("list-dependencies", "--plain", unit).text()).split("\n").map((line) => line.trim())
-    await systemctl("kill", "--signal=KILL", ...parts.filter((part) => part && part !== unit))
+    await stopNow()
   },
   async healthy() {
     const required = (await systemctl("show", "-p", "Requires", "--value", unit).text()).split(/\s+/).filter(Boolean)
@@ -67,6 +72,9 @@ const commands: Record<string, () => Promise<void>> = {
     mkdirSync(runtime, { recursive: true })
     rmSync(held, { force: true })
     const started = { clock: performance.now(), wall: Date.now() }
+    // systemd kills a standby that stops answering, and ExecStopPost takes down what it held.
+    const watchdog = Number(process.env.WATCHDOG_USEC ?? 0) / 1000
+    if (watchdog) setInterval(() => Bun.spawn(["systemd-notify", "WATCHDOG=1"]), watchdog / 4).unref()
     let stopping = false
     let move: false | "move" | "away" = false
     process.on("SIGUSR1", () => void (move = "move"))
@@ -110,6 +118,8 @@ const commands: Record<string, () => Promise<void>> = {
     if (!existsSync(held)) exit(`standby: ${name} doesn't hold the lease`)
     await systemctl("kill", `--signal=${process.argv[3] === "--away" ? "USR2" : "USR1"}`, "standby.service")
   },
+  /** After standby.service exits, however it went. */
+  fence: stopNow,
   async drill() {
     if (process.argv[3] === "off") rmSync(drill, { force: true })
     else writeFileSync(drill, "")

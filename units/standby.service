@@ -4,9 +4,13 @@ After=network-online.target
 
 [Service]
 ExecStart=%h/.local/share/standby/standby run
+ExecStopPost=-%h/.local/share/standby/standby fence
 RuntimeDirectory=standby
 Restart=always
 RestartSec=2
+WatchdogSec=5
+NotifyAccess=all
+WatchdogSignal=SIGKILL
 # A machine going down stops what it holds and passes the lease on before standby exits.
 TimeoutStopSec=5min
 

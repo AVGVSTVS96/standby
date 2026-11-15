@@ -1,20 +1,24 @@
 #!/bin/sh
-# db-arrive <database>: makes this machine's copy the one the lease's tenure runs on. A disk that already ran this
-# tenure keeps its copy; any other restores the newest tenure before it that has a snapshot in the bucket.
+# db-arrive <database>: makes this machine's copy the one the lease's tenure runs on. A disk that ran this tenure, or
+# the one just before it, keeps its copy; any other restores the newest earlier tenure that has a snapshot in the bucket.
 set -eu
 db=$1 mark=$1.tenure
-[ "$(cat "$mark" 2>/dev/null)" != "$TENURE" ] || exit 0
-export LITESTREAM_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID LITESTREAM_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
-from=${FROM:-0}
-while [ "$from" -ge 1 ]; do
+ran=$(cat "$mark" 2>/dev/null || true)
+[ "$ran" != "$TENURE" ] || exit 0
+if [ "$ran" != "${FROM:-}" ]; then
+  export LITESTREAM_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID LITESTREAM_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+  from=${FROM:-0}
   rm -f "$db.arriving"
-  litestream restore -if-replica-exists -o "$db.arriving" "$REPLICA/$from?endpoint=$ENDPOINT&region=auto"
-  [ ! -f "$db.arriving" ] || break
-  from=$((from - 1))
-done
-if [ -f "$db.arriving" ]; then
-  rm -f "$db-wal" "$db-shm"
-  mv "$db.arriving" "$db"
+  while [ "$from" -ge 1 ] && [ ! -f "$db.arriving" ]; do
+    litestream restore -if-replica-exists -o "$db.arriving" "$REPLICA/$from?endpoint=$ENDPOINT&region=auto"
+    from=$((from - 1))
+  done
+  if [ -f "$db.arriving" ]; then
+    # What this disk wrote that never reached the bucket stays beside it, never under the new tenure.
+    for file in "$db" "$db-wal"; do [ ! -f "$file" ] || mv "$file" "$db.ran-${ran:-unknown}${file#"$db"}"; done
+    rm -f "$db-shm"
+    mv "$db.arriving" "$db"
+  fi
 fi
 # Litestream's local state describes the path of the tenure before.
 rm -rf "$(dirname "$db")/.$(basename "$db")-litestream"

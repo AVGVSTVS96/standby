@@ -1,0 +1,11 @@
+{
+  "name": "standby",
+  "version": "0.1.0",
+  "description": "Runs a service on exactly one of several machines, and moves it when that machine goes away.",
+  "type": "module",
+  "license": "MIT",
+  "bin": { "standby": "src/cli.ts" },
+  "scripts": { "test": "bun test", "lint": "oxlint", "build": "bun build --compile src/cli.ts --outfile dist/standby" },
+  "dependencies": { "aws4fetch": "^1.0.20" },
+  "devDependencies": { "@types/bun": "latest", "oxlint": "latest", "typescript": "latest" }
+}

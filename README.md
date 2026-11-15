@@ -23,7 +23,7 @@ The lease is one small object in S3-compatible storage. Only one machine can win
 
 `lease.json`: `{ holder, tenure, claim? }`. Every write is a compare-and-swap on the object's ETag (`If-Match`, or `If-None-Match: *` for the first).
 
-- **Holding.** The holder rewrites the lease every `TTL/6`. If no write has succeeded for `3/4 TTL`, or a write comes back 412 and the lease now names someone else, it stops being the holder at once. Both the monotonic and the wall clock count, so a machine that slept or froze knows.
+- **Holding.** The holder rewrites the lease every `TTL/6`. If no write has succeeded for `2/3 TTL`, or a write comes back 412 and the lease now names someone else, it stops being the holder at once. Both the monotonic and the wall clock count, so a machine that slept or froze knows.
 - **Waiting.** A waiter reads the lease every few seconds. Once it has seen the same ETag for a full `TTL` on its own clock, the holder is gone and the waiter writes itself in. No clocks are compared between machines.
 - **Tenure** goes up by one each time the holder changes. It names the database's replica path, `db/<tenure>`, so a machine that froze and woke after losing the lease can only write where nobody reads.
 - **Passing it on.** A holder that is shutting down, was told to move (`standby move`), or can't keep its service up for `UNHEALTHY` seconds, stops the service and writes the next holder in: the machine in `claim`, or nobody.
@@ -31,7 +31,7 @@ The lease is one small object in S3-compatible storage. Only one machine can win
 
 ## systemd is the state
 
-`standby.service` runs on every machine. While it holds the lease, `$XDG_RUNTIME_DIR/standby/held` exists (an env file: `TENURE`, `FROM_TENURE`, `FROM_HOLDER`) and standby starts `UNIT`, a target you define:
+`standby.service` runs on every machine. While it holds the lease, `$XDG_RUNTIME_DIR/standby/held` exists (an env file: `TENURE`, `FROM`, the tenure before, and `LEFT`, a machine that went away) and standby starts `UNIT`, a target you define:
 
 ```ini
 # your.target
@@ -41,9 +41,17 @@ After=standby.service
 ConditionPathExists=%t/standby/held
 ```
 
-Everything that must run on one machine is `PartOf` that target. When standby loses the lease it exits, systemd stops the target, and `Restart=always` brings standby back as a waiter. There is no holder file and no start-up check to pass or skip: a unit is up because the lease is held.
+Everything that must run on one machine binds to that target, in a drop-in:
 
-The database is three units in that target, ordered before the service: restore (`db/<FROM_TENURE>`, skipped when this machine was the last holder), `litestream replicate` to `db/<TENURE>`, then the service, which stops first so its last writes are streamed.
+```ini
+[Unit]
+BindsTo=your.target
+After=your.target
+```
+
+So nothing starts it without the lease, it stops before standby passes the lease on (and before standby itself, when the machine goes down), and when the lease is lost standby kills it outright, whatever its own stop would take. When standby itself dies or hangs (`WatchdogSec`), `ExecStopPost` does the same. There is no holder file and no start-up check to pass or skip: a unit is up because the lease is held.
+
+The database is three units in that target, ordered before the service: restore (`db/<FROM>`, skipped when this disk ran that tenure or this one; what a disk wrote that never reached the bucket is kept beside it as `<db>.ran-<tenure>`), `litestream replicate` to `db/<TENURE>`, then the service, which stops first so its last writes are streamed.
 
 ## One hook
 
@@ -63,4 +71,4 @@ Each machine builds a tagged release into a place nothing syncs: `standby instal
 
 ## What it costs
 
-The bucket is a dependency: a holder that can't reach it for `3/4 TTL` stops its service, and nobody can take over while the bucket is down. A takeover after a crash takes `TTL` plus the restore, and loses at most Litestream's sync interval (1s) of writes; until a new holder's first snapshot is up, a second crash falls back to the previous tenure.
+The bucket is a dependency: a holder that can't reach it for `2/3 TTL` stops its service, and nobody can take over while the bucket is down. A takeover after a crash takes `TTL` plus the restore, and loses at most Litestream's sync interval (1s) of writes; until a new holder's first snapshot is up, a second crash falls back to the previous tenure.

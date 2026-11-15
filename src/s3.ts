@@ -3,6 +3,9 @@ import type { Lease, Seen, Store } from "./lease"
 
 export type Bucket = { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string; key?: string }
 
+/** A store that compresses a response marks its ETag weak (W/"…"), which If-Match never matches. */
+const strong = (etag: string) => etag.replace(/^W\//, "")
+
 export function s3({ endpoint, bucket, accessKeyId, secretAccessKey, key = "lease.json" }: Bucket, cutOff: () => boolean): Store & { remove(): Promise<void> } {
   const client = new AwsClient({ accessKeyId, secretAccessKey, service: "s3", region: "auto" })
   const url = `${endpoint.replace(/\/$/, "")}/${bucket}/${key}`
@@ -13,10 +16,10 @@ export function s3({ endpoint, bucket, accessKeyId, secretAccessKey, key = "leas
 
   return {
     async read(): Promise<Seen | null> {
-      const response = await request({ headers: { "cache-control": "no-cache" } })
+      const response = await request({ headers: { "cache-control": "no-cache", "accept-encoding": "identity" } })
       if (response.status === 404) return null
       if (!response.ok) throw new Error(`reading the lease: ${response.status}`)
-      return { lease: (await response.json()) as Lease, etag: response.headers.get("etag")! }
+      return { lease: (await response.json()) as Lease, etag: strong(response.headers.get("etag")!) }
     },
     async write(lease, etag) {
       const response = await request({

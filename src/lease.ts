@@ -48,12 +48,15 @@ export type Deps = {
   moveAsked(): false | "move" | "away"
 }
 
-const poll = (ttl: number) => ttl / 12
+/** Reads are cheap, and a waiter that looks often takes a passed lease within a second. */
+const poll = (ttl: number) => ttl / 60
 
 export async function run(config: Config, deps: Deps): Promise<void> {
   const { name, ttl } = config
   const { store, service, now, sleep } = deps
   let sitOutUntil = 0
+  /** Tenures in a row this machine gave up because its service wouldn't stay up: each doubles how long it sits out. */
+  let failures = 0
   let last = ""
 
   const changed = (lease: Lease, mine: boolean, lost?: Lost) => {
@@ -80,14 +83,18 @@ export async function run(config: Config, deps: Deps): Promise<void> {
     let reached = now()
     while (!deps.stopping()) {
       const seen = await store.read().catch(() => undefined)
+      // A read that failed says nothing: the same ETag seen a TTL apart is what shows the holder is gone.
       if (seen === undefined) {
-        stale = { etag: "", since: 0 }
         if (now() - reached > ttl / 2) healthySince = now()
         await sleep(poll(ttl))
         continue
       }
       reached = now()
-      if (!seen) return take({ holder: name, tenure: 1 }, null)
+      // A lease is made once, by hand (`standby init`): one that went missing must not start again at tenure 1.
+      if (!seen) {
+        await sleep(poll(ttl))
+        continue
+      }
       const { lease, etag } = seen
       changed(lease, false)
       const resting = now() < sitOutUntil
@@ -100,10 +107,10 @@ export async function run(config: Config, deps: Deps): Promise<void> {
       } else if (now() - stale.since >= ttl && !resting) {
         await deps.beforeHold()
         return take({ ...succeed(lease), left: lease.holder }, etag)
-      } else if (config.home && !lease.claim && !lease.free && now() - healthySince >= config.stable) {
+      } else if (config.home && !resting && !lease.claim && !lease.free && now() - healthySince >= config.stable) {
         await take({ ...lease, claim: name }, etag)
       }
-      await sleep(lease.claim === name ? poll(ttl) / 5 : poll(ttl))
+      await sleep(poll(ttl))
     }
     return null
   }
@@ -116,6 +123,7 @@ export async function run(config: Config, deps: Deps): Promise<void> {
     let over = false
     const expired = () => now() - renewed > (ttl * 2) / 3
     let away = false
+    let gaveUp = false
     const fence = async (why: string) => {
       if (over) return
       over = true
@@ -139,7 +147,10 @@ export async function run(config: Config, deps: Deps): Promise<void> {
       away ||= asked === "away"
       if (asked || lease.claim) pass()
       else if (await service.healthy()) unhealthySince = null
-      else if (now() - (unhealthySince ??= now()) >= config.unhealthy) pass()
+      else if (now() - (unhealthySince ??= now()) >= config.unhealthy) {
+        gaveUp = true
+        pass()
+      }
 
       const handing = done
       const next = !handing
@@ -152,7 +163,8 @@ export async function run(config: Config, deps: Deps): Promise<void> {
 
       if (written && handing) {
         over = true
-        if (!lease.claim) sitOutUntil = now() + config.stable
+        failures = gaveUp ? Math.min(failures + 1, 4) : 0
+        if (gaveUp || !lease.claim) sitOutUntil = now() + config.stable * 2 ** failures
         return changed(written.lease, false, away ? "left" : "passed")
       }
       if (written) {

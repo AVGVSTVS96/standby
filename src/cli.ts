@@ -108,9 +108,14 @@ const commands: Record<string, () => Promise<void>> = {
       },
     )
   },
+  /** Makes the lease, once, held by this machine: `standby init [tenure]`, the tenure only when replacing a lease that was lost. */
+  async init() {
+    const made = await store.write({ holder: name, tenure: Number(process.argv[3] ?? 1), beat: crypto.randomUUID() }, null)
+    console.log(made ? `standby: ${name} holds the new lease` : "standby: there is a lease already")
+  },
   async status() {
     const seen = await store.read()
-    if (!seen) return console.log("no lease yet")
+    if (!seen) return console.log("no lease: `standby init` on the machine that should hold it makes one")
     const { holder, tenure, free, claim } = seen.lease
     console.log(`${free ? `free (last held by ${holder})` : holder} · tenure ${tenure}${claim ? ` · ${claim} asked for it` : ""}${existsSync(held) ? " · held here" : ""}`)
   },
@@ -126,4 +131,4 @@ const commands: Record<string, () => Promise<void>> = {
   },
 }
 
-await (commands[process.argv[2] ?? ""] ?? (() => exit("usage: standby run | status | move [--away] | drill [off]")))()
+await (commands[process.argv[2] ?? ""] ?? (() => exit("usage: standby run | init [tenure] | status | move [--away] | drill [off]")))()

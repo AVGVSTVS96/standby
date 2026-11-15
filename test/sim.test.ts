@@ -16,8 +16,8 @@ function world(seed: number, names: string[]) {
   let time = 0
   let order = 0
   const timers: { at: number; order: number; machine: Machine; generation?: number; fire: () => void }[] = []
-  let stored: (Seen & { n: number }) | null = null
-  let writes = 0
+  let writes = 1
+  let stored: (Seen & { n: number }) | null = { lease: { holder: names[0]!, tenure: 1, beat: "init" }, etag: "e1", n: 1 }
 
   type Machine = {
     name: string
@@ -117,15 +117,17 @@ function world(seed: number, names: string[]) {
   async function until(end: number, chaos: boolean) {
     let nextChaos = 0
     while (true) {
-      timers.sort((a, b) => Math.max(a.at, a.machine.frozenUntil) - Math.max(b.at, b.machine.frozenUntil) || a.order - b.order)
+      const due = (timer: (typeof timers)[number]) => Math.max(timer.at, timer.machine.frozenUntil)
+      // Not a subtraction: two timers of a machine frozen for good are both at Infinity.
+      timers.sort((a, b) => (due(a) < due(b) ? -1 : due(a) > due(b) ? 1 : a.order - b.order))
       const next = timers[0]
-      const due = next ? Math.max(next.at, next.machine.frozenUntil) : Infinity
-      if (due > end) break
-      if (due > time) {
+      const at = next ? due(next) : Infinity
+      if (at > end) break
+      if (at > time) {
         const up = active()
         if (up.length > 1) throw new Error(`two holders at ${time}ms: ${up.map((m) => m.name)}\n${log.slice(-30).join("\n")}`)
       }
-      time = due
+      time = at
       timers.shift()
       if (next!.generation !== undefined && next!.generation !== next!.machine.generation) continue
       next!.fire()
@@ -164,7 +166,7 @@ test("once the trouble ends, exactly one machine holds, and home gets it back", 
     const w = world(seed, ["server", "twin"])
     await w.until(1_800_000, true)
     for (const machine of w.machines) machine.broken = false
-    await w.until(w.time() + 900_000, false)
+    await w.until(w.time() + 6_000_000, false)
     const up = w.active().map((m) => m.name)
     if (up.join() !== "server") throw new Error(`seed ${seed}: ${up} holds, lease ${JSON.stringify(w.lease())}, ${JSON.stringify(w.machines)}\n${w.log.slice(-12).join("\n")}`)
   }

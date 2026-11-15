@@ -98,6 +98,7 @@ async function fresh(names: string[], options: Options = {}) {
     "-e", "ROOT_ACCESS_KEY=rig", "-e", "ROOT_SECRET_KEY=rigsecret", "-e", "VGW_REGION=auto", "--memory", "256m",
     "-v", `${join(state, "store")}:/data`, "docker.io/versity/versitygw:latest", "posix", "/data")
   await until("the store to answer", async () => (await store.read().catch(() => undefined)) !== undefined, 15_000)
+  await store.write({ holder: names[0]!, tenure: 1, beat: "init" }, null)
   await Promise.all(names.map((name) => create(name, options)))
 }
 

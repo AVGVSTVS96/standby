@@ -265,7 +265,7 @@ const tests: Record<string, () => Promise<Result>> = {
   async "standby-9"() {
     const { holder, other } = await started(["a", "b"], { stubborn: true })
     const since = now()
-    await root(holder, "pkill -KILL -f 'standby run'")
+    await as(holder, "systemctl --user kill --kill-whom=main --signal=KILL standby.service")
     await until(`${holder} to write again`, () => rows(holder).some((row) => row.at > since + 1500), TTL * 2)
     await sleep(3000)
     const before = rows(holder).filter((row) => row.at <= since).at(-1)!
@@ -278,13 +278,14 @@ const tests: Record<string, () => Promise<Result>> = {
   async hung() {
     const { holder, other } = await started(["a", "b"], { stubborn: true })
     const since = now()
-    await root(holder, "pkill -STOP -f 'standby run'")
+    await as(holder, "systemctl --user kill --kill-whom=main --signal=STOP standby.service")
     await sleep(TTL * 2)
     const two = overlaps([holder, other])
     check(two.length === 0, two.join("; "))
-    const quiet = rows(holder).filter((row) => row.at > since).findIndex((row, i, all) => (all[i + 1]?.at ?? now()) - row.at > 3000)
-    const stopped = rows(holder).filter((row) => row.at > since)[quiet]?.at ?? since
-    return { detail: `${holder}'s units went down ${seconds(stopped - since)} after its standby hung; ${writing(other) ? other : writing(holder) ? holder : "nobody"} holds now` }
+    const after = rows(holder).filter((row) => row.at > since)
+    const stopped = after.find((row, i) => (after[i + 1]?.at ?? now()) - row.at > 2500)?.at ?? since
+    check(stopped - since < TTL / 2, `${holder}'s toy kept running ${seconds(stopped - since)} after standby hung`)
+    return { detail: `the watchdog took ${holder}'s units down ${seconds(stopped - since)} after its standby hung; ${writing(other) ? other : writing(holder) ? holder : "nobody"} holds now` }
   },
 
   async broken() {
@@ -292,7 +293,7 @@ const tests: Record<string, () => Promise<Result>> = {
     const since = now()
     await as(holder, "touch $HOME/broken && systemctl --user kill toy.service")
     const { move } = await handover(holder, other, since, "planned", UNHEALTHY + TTL * 4)
-    return { detail: `${holder} couldn't run the toy and passed the lease to ${other}`, ms: { "fault to first row": firstAfter(other, since)!.at - since, "planned move": move } }
+    return { detail: `${holder} couldn't run the toy for UNHEALTHY (${seconds(UNHEALTHY)}) and passed the lease to ${other}`, ms: { "fault to first row on the new": move } }
   },
 
   async "reboot-taking"() {
@@ -325,21 +326,17 @@ const tests: Record<string, () => Promise<Result>> = {
     await sleep(TTL * 3)
     check(rows(other).length === 0, `${other} took over while ${holder}'s stubborn unit was still stopping`)
     const since = now()
-    await root(holder, "pkill -KILL -f stubborn")
+    await as(holder, "systemctl --user kill --signal=KILL stubborn.service")
     const { move } = await handover(holder, other, since, "planned")
     return { detail: `a unit that won't stop holds a planned move on ${holder}, renewing; once it's gone the move completes`, ms: { "planned move": move } }
   },
 
   async home() {
-    const { holder } = await started(["a", "b"], { home: "a" })
-    if (holder !== "a") return { detail: "b won the start, so there was nothing to bring home; run it again" }
-    const since = now()
-    await standby("a", "move")
-    await handover("a", "b", since, "planned")
-    const away = now()
-    await until("a to take the lease back", () => !!firstAfter("a", away), STABLE * 3 + TTL * 2)
-    const { move } = await handover("b", "a", away, "planned")
-    return { detail: `a got the lease back ${seconds(firstAfter("a", away)!.at - away)} after b took it`, ms: { "planned move": move } }
+    await started(["b"], { home: "a" })
+    const back = now()
+    await create("a", { home: "a" })
+    const { move } = await handover("b", "a", back, "planned", STABLE * 2 + TTL * 2)
+    return { detail: `home machine a came back and got the lease ${seconds(firstAfter("a", back)!.at - back)} after it booted`, ms: { "planned move": move } }
   },
 }
 
@@ -351,7 +348,8 @@ try {
   for (const name of chosen.length ? chosen : Object.keys(tests)) {
     const began = now()
     try {
-      const { detail, ms = {} } = await tests[name]!()
+      const deadline = sleep(300_000).then(() => Promise.reject(new Error("took over 5 minutes")))
+      const { detail, ms = {} } = await Promise.race([tests[name]!(), deadline])
       const times = Object.entries(ms).map(([what, value]) => `${what} ${seconds(value)}`).join(", ")
       console.log(`pass  ${name}: ${detail}${times ? ` (${times})` : ""}  [${seconds(now() - began)}]`)
     } catch (error) {

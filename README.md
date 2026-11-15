@@ -69,6 +69,10 @@ The database is three units in that target, ordered before the service: restore 
 
 Each machine builds a tagged release into a place nothing syncs: `standby install <tag>` fetches the tag, runs the tests, compiles one binary and restarts the service. Update the waiting machine first.
 
+## Proof
+
+`bun test` runs the simulation. `bun run rig` runs the outages for real: machines in podman containers with systemd, Litestream and a toy service, sharing one S3 store, each test on fresh machines, printing pass or fail and how long each move took (`bun run rig kill move` runs only those).
+
 ## What it costs
 
 The bucket is a dependency: a holder that can't reach it for `2/3 TTL` stops its service, and nobody can take over while the bucket is down. A takeover after a crash takes `TTL` plus the restore, and loses at most Litestream's sync interval (1s) of writes; until a new holder's first snapshot is up, a second crash falls back to the previous tenure.

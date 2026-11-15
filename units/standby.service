@@ -1,0 +1,14 @@
+[Unit]
+Description=standby: holds the lease for this machine, or waits for it
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/share/standby/standby run
+RuntimeDirectory=standby
+Restart=always
+RestartSec=2
+# A machine going down stops what it holds and passes the lease on before standby exits.
+TimeoutStopSec=5min
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,14 @@
+# Example: the database follows the lease. Set DB (the SQLite file) and REPLICA (s3://bucket/db) in standby.env,
+# make this and db.service part of your target, and order your service After=db.service.
+[Unit]
+Description=Bring the database to the lease's tenure
+ConditionPathExists=%t/standby/held
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=%h/.config/standby.env
+EnvironmentFile=%t/standby/held
+ExecStart=/bin/sh -c 'exec %h/.local/share/standby/db-arrive "$DB"'
+Restart=on-failure
+RestartSec=5

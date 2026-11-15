@@ -4,11 +4,14 @@ export type Lease = {
   from?: number
   free?: true
   claim?: string
+  /** A machine this tenure's holder took over from that died or was going down: what ran there needs carrying on. */
+  left?: string
   beat: string
 }
 
 export type Seen = { lease: Lease; etag: string }
 type Won = Seen & { sent: number }
+export type Lost = "fenced" | "left" | "passed"
 
 export interface Store {
   read(): Promise<Seen | null>
@@ -17,7 +20,7 @@ export interface Store {
 }
 
 export interface Service {
-  start(held: { tenure: number; from?: number }): Promise<void>
+  start(held: Lease): Promise<void>
   stop(): Promise<void>
   kill(why: string): Promise<void>
   healthy(): Promise<boolean>
@@ -38,9 +41,11 @@ export type Deps = {
   sleep(ms: number): Promise<void>
   beat(): string
   beforeHold(): Promise<void>
-  onChange(lease: Lease, mine: boolean): void
+  onChange(lease: Lease, mine: boolean, lost?: Lost): void
+  /** The machine is going down. */
   stopping(): boolean
-  moveAsked(): boolean
+  /** Asked to pass the lease on: "away" when this machine is about to sleep. */
+  moveAsked(): false | "move" | "away"
 }
 
 const poll = (ttl: number) => ttl / 12
@@ -51,9 +56,9 @@ export async function run(config: Config, deps: Deps): Promise<void> {
   let sitOutUntil = 0
   let last = ""
 
-  const changed = (lease: Lease, mine: boolean) => {
+  const changed = (lease: Lease, mine: boolean, lost?: Lost) => {
     const key = `${lease.holder} ${lease.tenure} ${lease.free ?? ""} ${mine}`
-    if (key !== last) deps.onChange(lease, mine)
+    if (key !== last) deps.onChange(lease, mine, lost)
     last = key
   }
   const write = (lease: Omit<Lease, "beat">, etag: string | null) => {
@@ -89,12 +94,12 @@ export async function run(config: Config, deps: Deps): Promise<void> {
       if (stale.etag !== etag) stale = { etag, since: now() }
 
       if (lease.holder === name) {
-        if (!resting) return take({ ...lease, free: undefined, claim: undefined }, etag)
+        if (!resting) return take({ ...lease, free: undefined, claim: undefined, left: lease.left === name ? undefined : lease.left }, etag)
       } else if (lease.free && !resting) {
-        return take(succeed(lease), etag)
+        return take({ ...succeed(lease), left: lease.left }, etag)
       } else if (now() - stale.since >= ttl && !resting) {
         await deps.beforeHold()
-        return take(succeed(lease), etag)
+        return take({ ...succeed(lease), left: lease.holder }, etag)
       } else if (config.home && !lease.claim && !lease.free && now() - healthySince >= config.stable) {
         await take({ ...lease, claim: name }, etag)
       }
@@ -110,10 +115,12 @@ export async function run(config: Config, deps: Deps): Promise<void> {
     let done = false
     let over = false
     const expired = () => now() - renewed > (ttl * 2) / 3
+    let away = false
     const fence = async (why: string) => {
       if (over) return
       over = true
       await service.kill(why)
+      changed(lease, false, "fenced")
     }
     const pass = () => {
       stopped ??= service.stop().then(() => void (done = true))
@@ -128,7 +135,9 @@ export async function run(config: Config, deps: Deps): Promise<void> {
     })()
 
     while (!over) {
-      if (deps.stopping() || deps.moveAsked() || lease.claim) pass()
+      const asked = deps.stopping() ? "away" : deps.moveAsked()
+      away ||= asked === "away"
+      if (asked || lease.claim) pass()
       else if (await service.healthy()) unhealthySince = null
       else if (now() - (unhealthySince ??= now()) >= config.unhealthy) pass()
 
@@ -136,15 +145,15 @@ export async function run(config: Config, deps: Deps): Promise<void> {
       const next = !handing
         ? lease
         : lease.claim
-          ? { holder: lease.claim, tenure: lease.tenure + 1, from: lease.tenure }
-          : { ...lease, free: true as const }
+          ? { holder: lease.claim, tenure: lease.tenure + 1, from: lease.tenure, left: away ? name : undefined }
+          : { ...lease, free: true as const, left: away ? name : undefined }
       const written = await write(next, etag).catch(() => undefined)
       if (over) return
 
       if (written && handing) {
         over = true
         if (!lease.claim) sitOutUntil = now() + config.stable
-        return changed(written.lease, false)
+        return changed(written.lease, false, away ? "left" : "passed")
       }
       if (written) {
         ;({ lease, etag, sent: renewed } = written)

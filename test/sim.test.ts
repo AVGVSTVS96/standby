@@ -26,10 +26,11 @@ function world(seed: number, names: string[]) {
     running: boolean
     generation: number
     tenure?: number
+    tenureRuns: number
     move: boolean
     broken: boolean
   }
-  const machines = names.map<Machine>((name) => ({ name, frozenUntil: 0, cutUntil: 0, running: false, generation: 0, move: false, broken: false }))
+  const machines = names.map<Machine>((name) => ({ name, frozenUntil: 0, cutUntil: 0, running: false, generation: 0, move: false, broken: false, tenureRuns: 0 }))
   const log: string[] = []
   const say = (text: string) => log.push(`${(time / 1000).toFixed(1).padStart(8)}s ${text}`)
 
@@ -77,17 +78,20 @@ function world(seed: number, names: string[]) {
         beforeHold: () => at(machine, random() < 0.2 ? 40_000 : 0),
         onChange: () => {},
         stopping: () => !alive(),
-        moveAsked: () => (machine.move ? !(machine.move = false) : false),
+        moveAsked: () => (machine.move ? ((machine.move = false), random() < 0.5 ? "move" : "away") : false),
         service: {
           async start(held) {
             if (!alive()) return
             machine.running = true
+            machine.tenureRuns++
             machine.tenure = held.tenure
             say(`${machine.name} runs tenure ${held.tenure}`)
           },
+          // systemd runs jobs in order: a stop asked before the latest start doesn't undo it.
           async stop() {
+            const run = machine.tenureRuns
             await at(machine, random() * 8000)
-            if (alive()) machine.running = false
+            if (alive() && run === machine.tenureRuns) machine.running = false
             say(`${machine.name} stopped`)
           },
           async kill(why) {
@@ -162,7 +166,7 @@ test("once the trouble ends, exactly one machine holds, and home gets it back", 
     for (const machine of w.machines) machine.broken = false
     await w.until(w.time() + 900_000, false)
     const up = w.active().map((m) => m.name)
-    if (up.join() !== "server") throw new Error(`seed ${seed}: ${up} holds\n${w.log.slice(-30).join("\n")}`)
+    if (up.join() !== "server") throw new Error(`seed ${seed}: ${up} holds, lease ${JSON.stringify(w.lease())}, ${JSON.stringify(w.machines)}\n${w.log.slice(-12).join("\n")}`)
   }
 }, 600_000)
 

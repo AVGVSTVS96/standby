@@ -1,0 +1,12 @@
+[Unit]
+Description=Stream the database to the lease's tenure
+Requires=db-arrive.service
+After=db-arrive.service
+ConditionPathExists=%t/standby/held
+
+[Service]
+EnvironmentFile=%h/.config/standby.env
+EnvironmentFile=%t/standby/held
+ExecStart=litestream replicate -config %h/.local/share/standby/litestream.yml
+Restart=always
+RestartSec=5

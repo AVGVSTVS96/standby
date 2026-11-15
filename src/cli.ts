@@ -39,14 +39,14 @@ const hook = (command: string | undefined, env: Record<string, string> = {}) =>
   command ? $`sh -c ${command}`.env({ ...process.env, ...env }).nothrow() : undefined
 
 const service: Service = {
-  async start({ tenure, from }) {
-    writeFileSync(held, `TENURE=${tenure}\nFROM=${from ?? ""}\n`)
+  async start({ tenure, from, left }) {
+    writeFileSync(held, `TENURE=${tenure}\nFROM=${from ?? ""}\nLEFT=${left ?? ""}\n`)
     console.log(`standby: ${name} holds the lease, tenure ${tenure}`)
     await systemctl("start", "--no-block", unit)
   },
   async stop() {
-    await systemctl("stop", unit)
     rmSync(held, { force: true })
+    await systemctl("stop", unit)
   },
   async kill(why) {
     console.error(`standby: ${name} lost the lease (${why})`)
@@ -68,8 +68,9 @@ const commands: Record<string, () => Promise<void>> = {
     rmSync(held, { force: true })
     const started = { clock: performance.now(), wall: Date.now() }
     let stopping = false
-    let move = false
-    process.on("SIGUSR1", () => void (move = true))
+    let move: false | "move" | "away" = false
+    process.on("SIGUSR1", () => void (move = "move"))
+    process.on("SIGUSR2", () => void (move = "away"))
     for (const signal of ["SIGTERM", "SIGINT"] as const) {
       process.on(signal, async () => {
         // A machine going down passes the lease on first; a plain restart keeps it and takes it straight back.
@@ -88,9 +89,14 @@ const commands: Record<string, () => Promise<void>> = {
         sleep: (ms) => Bun.sleep(ms),
         beat: () => crypto.randomUUID(),
         beforeHold: async () => void (await hook(settings.BEFORE_HOLD)),
-        onChange: (lease, mine) => void hook(settings.ON_CHANGE, { HOLDER: lease.free ? "" : lease.holder, TENURE: String(lease.tenure), MINE: mine ? "1" : "" }),
+        onChange: (lease, mine, lost) =>
+          void hook(settings.ON_CHANGE, { HOLDER: lease.free ? "" : lease.holder, TENURE: String(lease.tenure), MINE: mine ? "1" : "", LEFT: lease.left ?? "", LOST: lost ?? "" }),
         stopping: () => stopping,
-        moveAsked: () => (move ? !(move = false) : false),
+        moveAsked: () => {
+          const asked = move
+          move = false
+          return asked
+        },
       },
     )
   },
@@ -102,7 +108,7 @@ const commands: Record<string, () => Promise<void>> = {
   },
   async move() {
     if (!existsSync(held)) exit(`standby: ${name} doesn't hold the lease`)
-    await systemctl("kill", "--signal=USR1", "standby.service")
+    await systemctl("kill", `--signal=${process.argv[3] === "--away" ? "USR2" : "USR1"}`, "standby.service")
   },
   async drill() {
     if (process.argv[3] === "off") rmSync(drill, { force: true })
@@ -110,4 +116,4 @@ const commands: Record<string, () => Promise<void>> = {
   },
 }
 
-await (commands[process.argv[2] ?? ""] ?? (() => exit("usage: standby run | status | move | drill [off]")))()
+await (commands[process.argv[2] ?? ""] ?? (() => exit("usage: standby run | status | move [--away] | drill [off]")))()

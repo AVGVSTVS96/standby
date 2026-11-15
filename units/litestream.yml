@@ -1,0 +1,9 @@
+# The holder streams the database to its tenure's own path, so a machine that lost the lease can't write where anyone reads.
+access-key-id: ${AWS_ACCESS_KEY_ID}
+secret-access-key: ${AWS_SECRET_ACCESS_KEY}
+dbs:
+  - path: ${DB}
+    replica:
+      url: ${REPLICA}/${TENURE}
+      endpoint: ${ENDPOINT}
+      region: auto

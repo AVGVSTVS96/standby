@@ -90,8 +90,12 @@ const service: Service = {
   },
   async healthy() {
     const upheld = await words("show", "-p", "Upholds", "--value", unit)
-    // is-active passes when any one unit is active, so each one's state is read.
-    return (await words("is-active", ...upheld)).every((state) => state === "active")
+    // is-active passes when any one unit is active, so each one's state is read. A unit stopping to restart, as for an
+    // update, is on its way back within its own stop timeout, however long that stop takes.
+    const states = await words("is-active", ...upheld)
+    const jobs = (await systemctl("list-jobs", "--no-legend", ...upheld).text()).split("\n").map((line) => line.trim().split(/\s+/))
+    const restarting = new Set(jobs.filter(([, , type]) => type === "restart").map(([, name]) => name))
+    return states.every((state, i) => state === "active" || (state === "deactivating" && restarting.has(upheld[i]!)))
   },
   // The held file's time is the last renewal's, for a restarted standby to know its fence deadline.
   renewed(ago) {

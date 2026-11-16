@@ -54,8 +54,8 @@ export type Deps = {
   beforeHold(): Promise<void>
   /** While another machine holds `tenure`, keeps a copy of its database: current within moments when `near`. */
   follow(tenure: number, near: boolean): Promise<void>
-  /** Whether the copy is current now, as it must be before this machine claims the lease. */
-  ready(): Promise<boolean>
+  /** Whether this machine may claim the lease from `holder` now: its copy is current, and so is what READY looks at. */
+  ready(holder: string): Promise<boolean>
   onChange(lease: Lease, mine: boolean, lost?: Lost): void
   /** The machine is going down. */
   stopping(): boolean
@@ -176,7 +176,7 @@ export async function run(config: Config, deps: Deps): Promise<void> {
         else if (!resting && silent >= ttl) {
           await deps.beforeHold()
           return take({ ...succeed(lease), left: lease.holder }, etag)
-        } else if (!resting && !lease.claim && (lease.moving || home) && (await deps.ready()) && (await take({ ...lease, claim: name }, etag))) claimed = now()
+        } else if (!resting && !lease.claim && (lease.moving || home) && (await deps.ready(lease.holder)) && (await take({ ...lease, claim: name }, etag))) claimed = now()
       }
       before = { etag, sent }
       await sleep(now() - claimed < ttl ? ttl / 600 : poll(ttl))

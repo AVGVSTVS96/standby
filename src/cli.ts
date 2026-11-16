@@ -39,8 +39,8 @@ const settingsOfBucket = () =>
 let opened: ReturnType<typeof s3> | undefined
 const store = () => (opened ??= s3(settingsOfBucket(), () => existsSync(drill)))
 const systemctl = (...args: string[]) => $`systemctl --user ${args}`.nothrow().quiet()
-const hook = (command: string | undefined, env: Record<string, string> = {}) =>
-  command ? Bun.spawn(["sh", "-c", command], { env: { ...process.env, ...env }, stdio: ["ignore", "inherit", "inherit"] }).exited : undefined
+const hook = (command: string | undefined, env: Record<string, string> = {}, timeout?: number) =>
+  command ? Bun.spawn(["sh", "-c", command], { env: { ...process.env, ...env }, stdio: ["ignore", "inherit", "inherit"], timeout }).exited : undefined
 const words = async (...args: string[]) => (await systemctl(...args).text()).split(/\s+/).filter(Boolean)
 
 /**
@@ -160,7 +160,9 @@ const commands: Record<string, () => Promise<void>> = {
           await systemctl("restart", "--no-block", follower)
         },
         // Active is ready (Type=notify), once no restart is queued that would make it follow anew.
-        ready: async () => !follower || ((await systemctl("is-active", "-q", follower)).exitCode === 0 && !(await words("list-jobs", "--no-legend", follower)).length),
+        ready: async (holder) =>
+          (!follower || ((await systemctl("is-active", "-q", follower)).exitCode === 0 && !(await words("list-jobs", "--no-legend", follower)).length)) &&
+          (await (hook(settings.READY, { HOLDER: holder }, ttl / 6) ?? 0)) === 0,
         onChange: (lease, mine, lost) =>
           void hook(settings.ON_CHANGE, { HOLDER: lease.free ? "" : lease.holder, TENURE: String(lease.tenure), MINE: mine ? "1" : "", LEFT: lease.left ?? "", LOST: lost ?? "" }),
         stopping: () => stopping,

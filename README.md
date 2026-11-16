@@ -28,7 +28,7 @@ The lease is one small object in S3-compatible storage. Only one machine can win
 - **Tenure** goes up by one each time the holder changes. It names the database's replica path, `db/<tenure>`, so a machine that froze and woke after losing the lease can only write where nobody reads.
 - **Passing it on.** A holder that is shutting down, or can't keep what its target `Upholds=` up for `UNHEALTHY` seconds, stops the service and writes the next holder in: the machine in `claim`, or nobody. One that gave up on its service then sits out `STABLE`, doubled for each tenure in a row it gave up (up to 16 times), so a machine that can't run the service doesn't keep taking it back. With the lease goes `handoff`, the last transaction the database's stream sent as it stopped.
 - **Moving.** `standby move` marks the lease `moving` and keeps the service running. A waiter whose copy of the database is current writes its name into `claim`, and the holder, looking every `TTL/60` while it waits, stops the service and passes the lease to it. A move nobody claims within `TTL/2` passes the lease to nobody, for the first waiter to take; the machine that passed it takes it back only after `TTL/6`.
-- **Home.** A machine with `HOME_MACHINE=1` that has waited healthily for `STABLE` seconds writes its name into `claim`. The holder sees it at its next renewal and passes the lease on.
+- **Home.** A machine with `HOME_MACHINE=1` that has waited healthily for `STABLE` seconds, and whose `READY` command (if set, with the holder in `HOLDER`) exits 0 within `TTL/6`, writes its name into `claim`. A move's waiter asks `READY` the same way. The holder sees it at its next renewal and passes the lease on.
 
 ## systemd is the state
 
@@ -82,7 +82,7 @@ The follower needs Litestream with [#1606](https://github.com/benbjohnson/litest
 
 ## Settings
 
-`~/.config/standby.env`: `BUCKET`, `ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `UNIT`, and optionally `NAME` (hostname), `TTL` (60), `HOME_MACHINE`, `STABLE` (300), `UNHEALTHY` (120), `ON_CHANGE`, `BEFORE_HOLD`, `FOLLOW` (the unit that keeps the warm copy). The database's units read `DB` and `REPLICA` there too.
+`~/.config/standby.env`: `BUCKET`, `ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `UNIT`, and optionally `NAME` (hostname), `TTL` (60), `HOME_MACHINE`, `STABLE` (300), `UNHEALTHY` (120), `ON_CHANGE`, `BEFORE_HOLD`, `READY`, `FOLLOW` (the unit that keeps the warm copy). The database's units read `DB` and `REPLICA` there too.
 
 ## Commands
 

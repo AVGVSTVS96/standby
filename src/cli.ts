@@ -96,7 +96,10 @@ const service: Service = {
   // The held file's time is the last renewal's, for a restarted standby to know its fence deadline.
   renewed(ago) {
     const at = new Date(Date.now() - ago)
-    if (existsSync(held)) utimesSync(held, at, at)
+    if (!existsSync(held)) return
+    const gap = at.getTime() - statSync(held).mtimeMs
+    if (gap > (ttl * 2) / 3) console.log(`standby: ${name} renewed the lease ${Math.round(gap / 1000)}s after the last renewal, before anyone could take it`)
+    utimesSync(held, at, at)
   },
 }
 

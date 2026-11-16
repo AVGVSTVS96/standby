@@ -211,10 +211,25 @@ export async function run(config: Config, deps: Deps): Promise<void> {
     if (expired()) return
     changed(lease, true)
     await service.start(lease)
-    // Its own loop, so a renewal still in flight when a frozen machine wakes can't delay the fence.
+    const renewal = () => ({ ...lease, moving: moving === null ? undefined : (true as const) })
+    // Its own loop, so a renewal still in flight when a frozen machine wakes can't delay the fence. Nobody can take the
+    // lease until a full TTL after the last renewal, so past 2/3 TTL it renews by itself until 5/6 TTL before it fences:
+    // a machine that froze, or whose renewals were stuck behind a slow health check, keeps what it runs if nobody took over.
     void (async () => {
-      while (!over && !expired()) await sleep(1000)
-      await fence(`no renewal for ${Math.round((now() - renewed) / 1000)}s`)
+      while (!over) {
+        if (!expired()) {
+          await sleep(1000)
+          continue
+        }
+        const left = renewed + (ttl * 5) / 6 - now()
+        if (left <= 0 || stopped) return fence(`no renewal for ${Math.round((now() - renewed) / 1000)}s`)
+        const won = await Promise.race([write(renewal(), etag).catch(() => null), sleep(left).then(() => null)])
+        if (over) return
+        if (won) {
+          ;({ lease, etag, sent: renewed } = won)
+          service.renewed(now() - renewed)
+        } else await sleep(Math.max(0, Math.min(1000, renewed + (ttl * 5) / 6 - now())))
+      }
     })()
 
     while (!over) {
@@ -240,7 +255,7 @@ export async function run(config: Config, deps: Deps): Promise<void> {
         continue
       }
       const next = !handing
-        ? { ...lease, moving: moving === null ? undefined : (true as const) }
+        ? renewal()
         : lease.claim
           ? { holder: lease.claim, tenure: lease.tenure + 1, from: lease.tenure, handoff, left: away ? name : undefined }
           : { ...lease, free: true as const, moving: undefined, handoff, left: away ? name : undefined }

@@ -23,7 +23,7 @@ The lease is one small object in S3-compatible storage. Only one machine can win
 
 `lease.json`: `{ holder, tenure, from?, free?, claim?, moving?, handoff?, left?, retired?, beat }`. Every write is a compare-and-swap on the object's ETag (`If-Match`), and carries a random `beat`, since a store may give identical bodies identical ETags. The lease is made once, by `standby init` on the machine that should hold it: a lease that went missing is never started again at tenure 1 by itself. `standby retire` takes it out of use: its holder stops at its next renewal, no waiter takes it, and the next `standby init` makes the tenure after it.
 
-- **Holding.** The holder rewrites the lease every `TTL/6`. If no write has succeeded for `2/3 TTL`, or a write comes back 412 and the lease now names someone else, it stops being the holder at once. Both the monotonic and the wall clock count, so a machine that slept or froze knows.
+- **Holding.** The holder rewrites the lease every `TTL/6`. If no write has succeeded for `2/3 TTL`, it keeps trying until `5/6 TTL` and then stops being the holder; nobody can take the lease before a full `TTL`, so a machine that froze for half a minute under load, and wakes with the lease still its own, keeps what it runs. A write that comes back 412 with the lease naming someone else stops it at once. Both the monotonic and the wall clock count, so a machine that slept or froze knows.
 - **Waiting.** A waiter reads the lease every `TTL/60` (reads are cheap, and it takes a passed lease within a second), every `TTL/600` for a `TTL` after it claimed the lease. Once it has seen the same ETag for a full `TTL` on its own clock, the holder is gone and the waiter writes itself in. No clocks are compared between machines. A lease passed to it since its last read was written after that read was sent, so it may run the service from then for `2/3 TTL`, as after a renewal: it starts at once and renews as it does.
 - **Tenure** goes up by one each time the holder changes. It names the database's replica path, `db/<tenure>`, so a machine that froze and woke after losing the lease can only write where nobody reads.
 - **Passing it on.** A holder that is shutting down, or can't keep what its target `Upholds=` up for `UNHEALTHY` seconds, stops the service and writes the next holder in: the machine in `claim`, or nobody. One that gave up on its service then sits out `STABLE`, doubled for each tenure in a row it gave up (up to 16 times), so a machine that can't run the service doesn't keep taking it back. With the lease goes `handoff`, the last transaction the database's stream sent as it stopped.
@@ -93,8 +93,8 @@ The follower needs Litestream with [#1606](https://github.com/benbjohnson/litest
 Each machine builds a tagged release into a folder of that version's own, somewhere nothing syncs, and the units name the version:
 
 ```sh
-git clone --depth 1 --branch v0.3.0 https://github.com/AVGVSTVS96/standby ~/.local/share/standby/v0.3.0
-cd ~/.local/share/standby/v0.3.0 && bun install && bun test && bun run build
+git clone --depth 1 --branch v0.3.1 https://github.com/AVGVSTVS96/standby ~/.local/share/standby/v0.3.1
+cd ~/.local/share/standby/v0.3.1 && bun install && bun test && bun run build
 ```
 
 A half-saved edit can't go live, and moving to a new version is a change of the path in `standby.service` and a restart, which leaves what the holder runs running.
@@ -119,4 +119,4 @@ Counted at the rig's store at `TTL` 60, per machine, and what that makes a month
 - The holder's stream: a write for each second that has new transactions, so up to 2.6M a month for a database written every second, and 10 to 15 lists a minute (450k to 650k a month) for Litestream's compaction and retention.
 - A waiter's copy: one list a minute while far (43k a month), four a second while near, and a read for each transaction file.
 
-The bucket is a dependency: a holder that can't reach it for `2/3 TTL` stops its service, and nobody can take over while the bucket is down. A takeover after a crash takes `TTL` plus the restore, and loses at most Litestream's sync interval (1s) of writes; until a new holder's first snapshot is up, a second crash falls back to the previous tenure.
+The bucket is a dependency: a holder that can't reach it for `5/6 TTL` stops its service, and nobody can take over while the bucket is down. A takeover after a crash takes `TTL` plus the restore, and loses at most Litestream's sync interval (1s) of writes; until a new holder's first snapshot is up, a second crash falls back to the previous tenure.

@@ -226,6 +226,21 @@ test("a holder that goes silent is replaced after one ttl, on the next tenure", 
   expect(w.lease()).toMatchObject({ holder: other.name, tenure: tenure + 1, from: tenure })
 })
 
+test("a holder that wakes from a freeze past 2/3 ttl, before anyone took over, keeps running on the same tenure", async () => {
+  for (let seed = 1; seed <= 20; seed++) {
+    const w = world(seed, ["server", "twin"])
+    await w.until(120_000, false)
+    const holder = w.active()[0]!
+    const { tenure } = w.lease()!
+    const runs = holder.tenureRuns
+    holder.frozenUntil = holder.renewed + (TTL * 2) / 3 + 2_000
+    await w.until(w.time() + 120_000, false)
+    expect(w.active()).toEqual([holder])
+    expect(w.lease()).toMatchObject({ holder: holder.name, tenure })
+    expect(holder.tenureRuns).toBe(runs)
+  }
+})
+
 test("a holder that restarts keeps its tenure, so it keeps its database", async () => {
   const w = world(11, ["server"])
   await w.until(60_000, false)

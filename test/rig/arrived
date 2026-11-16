@@ -1,0 +1,10 @@
+#!/bin/sh
+# What the database holds as the toy starts on it, before it writes: its last row, whether every churn row is from that
+# one transaction, and with CHECK, whether the file is whole (which takes a moment on a large database).
+set -eu
+[ -f "$DB" ] || exit 0
+check=-
+[ -z "${CHECK:-}" ] || check=$(sqlite3 -cmd ".timeout 5000" "$DB" "pragma quick_check" 2>&1 | tr '\n' ' ')
+last=$(sqlite3 -cmd ".timeout 5000" "$DB" "select coalesce(max(n), 0) from rows" 2>/dev/null || echo 0)
+churn=$(sqlite3 -cmd ".timeout 5000" "$DB" "select count(*) || ' ' || count(distinct n) || ' ' || coalesce(max(n), 0) from churn" 2>/dev/null || echo "0 0 0")
+echo "$(date +%s%3N) $TENURE $last $churn $check" >> "/rig/log/$(hostname).arrived"

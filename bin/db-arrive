@@ -1,25 +1,53 @@
 #!/bin/sh
 # db-arrive <database>: makes this machine's copy the one the lease's tenure runs on. A disk that ran this tenure, or
-# the one just before it, keeps its copy; any other restores the newest earlier tenure that has a snapshot in the bucket.
+# the one just before it, keeps its copy. A machine that followed the tenure before (db-follow, the unit FOLLOW) takes
+# its copy once it has that tenure's last transaction: HANDOFF, left by a holder that passed the lease on, or else all
+# the bucket has. Any other restores the newest earlier tenure that has a snapshot in the bucket.
 set -eu
-db=$1 mark=$1.tenure
+db=$1 mark=$1.tenure copy=$1.follow-${FROM:-}
 ran=$(cat "$mark" 2>/dev/null || true)
 [ "$ran" != "$TENURE" ] || exit 0
+export LITESTREAM_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID LITESTREAM_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+url() { echo "$REPLICA/$1?endpoint=$ENDPOINT&region=auto"; }
+at() { if [ -f "$copy-txid" ]; then echo $((0x$(cat "$copy-txid"))); else echo -1; fi; }
+arrived=
+if [ "$ran" != "${FROM:-}" ] && [ -n "${FROM:-}" ] && [ -n "${FOLLOW:-}" ] && [ -f "$copy-txid" ]; then
+  last=${HANDOFF:-$(litestream ltx -level all "$(url "$FROM")" | awk 'NR > 1 && $3 > max { max = $3 } END { print max }')}
+  if [ -n "$last" ]; then
+    # A follower looking often has the last transactions within moments; one that hasn't within PATIENCE seconds isn't
+    # following, and a restore is the sure way.
+    deadline=$(($(date +%s) + ${PATIENCE:-10}))
+    while [ "$(at)" -lt $((0x$last)) ] && [ "$(date +%s)" -lt "$deadline" ]; do
+      case $(systemctl --user is-active "$FOLLOW") in active | activating) sleep 0.05 ;; *) break ;; esac
+    done
+    # Under a read lock on the copy the follower can't be writing a page, so stopping it can't tear the copy. A follower
+    # that holds its lock that long is stuck mid-write, and its copy goes unused.
+    if sqlite3 "$copy" ".timeout 10000" "BEGIN; SELECT count(*) FROM sqlite_master;" ".system systemctl --user stop $FOLLOW" "COMMIT;" >/dev/null; then
+      [ "$(at)" -lt $((0x$last)) ] || arrived=$copy
+    fi
+  fi
+fi
+[ -z "${FOLLOW:-}" ] || systemctl --user stop "$FOLLOW"
 if [ "$ran" != "${FROM:-}" ]; then
-  export LITESTREAM_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID LITESTREAM_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
-  from=${FROM:-0}
-  rm -f "$db.arriving"
-  while [ "$from" -ge 1 ] && [ ! -f "$db.arriving" ]; do
-    litestream restore -if-replica-exists -o "$db.arriving" "$REPLICA/$from?endpoint=$ENDPOINT&region=auto"
-    from=$((from - 1))
-  done
-  if [ -f "$db.arriving" ]; then
+  if [ -z "$arrived" ]; then
+    from=${FROM:-0}
+    rm -f "$db.arriving"
+    while [ "$from" -ge 1 ] && [ ! -f "$db.arriving" ]; do
+      litestream restore -if-replica-exists -o "$db.arriving" "$(url "$from")"
+      from=$((from - 1))
+    done
+    [ ! -f "$db.arriving" ] || arrived=$db.arriving
+  fi
+  if [ -n "$arrived" ]; then
     # What this disk wrote that never reached the bucket stays beside it, never under the new tenure.
     for file in "$db" "$db-wal"; do [ ! -f "$file" ] || mv "$file" "$db.ran-${ran:-unknown}${file#"$db"}"; done
     rm -f "$db-shm"
-    mv "$db.arriving" "$db"
+    mv "$arrived" "$db"
+    sqlite3 "$db" "PRAGMA journal_mode=WAL" >/dev/null
+    echo "db-arrive: tenure $TENURE runs on $([ "$arrived" = "$copy" ] && echo "the copy that followed tenure $FROM, at its last transaction" || echo "a restore from the bucket")"
   fi
 fi
+rm -f "$db".follow-*
 # Litestream's local state describes the path of the tenure before.
 rm -rf "$(dirname "$db")/.$(basename "$db")-litestream"
 echo "$TENURE" > "$mark"

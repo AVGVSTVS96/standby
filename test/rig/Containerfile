@@ -1,5 +1,5 @@
 FROM docker.io/library/debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv dbus libpam-systemd sqlite3 nftables procps \
+RUN apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv dbus libpam-systemd sqlite3 nftables procps iproute2 \
  && rm -rf /var/lib/apt/lists/* \
  && useradd -m -u 1000 hex && mkdir -p /var/lib/systemd/linger /home/hex/.local/share/standby /home/hex/.config /home/hex/db \
  && touch /var/lib/systemd/linger/hex && chown -R hex:hex /home/hex

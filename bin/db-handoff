@@ -1,0 +1,9 @@
+#!/bin/sh
+# db-handoff <database> <file>: as the database's stream stops (ExecStopPost), writes the last transaction it streamed
+# to <file>, which standby passes on with the lease. Litestream exits cleanly only once the bucket has every
+# transaction it made; a stream that ended otherwise leaves nothing, and the next holder takes all the bucket has.
+set -eu
+rm -f "$2"
+[ "$SERVICE_RESULT" = success ] || exit 0
+last=$(ls "$(dirname "$1")/.$(basename "$1")-litestream/ltx/0" | grep '\.ltx$' | tail -n 1)
+[ -z "$last" ] || echo "$last" | cut -c 18-33 > "$2"

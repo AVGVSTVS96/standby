@@ -10,7 +10,8 @@ RuntimeDirectory=standby
 RuntimeDirectoryPreserve=restart
 Restart=always
 RestartSec=2
-WatchdogSec=5
+# At most TTL/3: a standby that hangs is replaced, and renews, before its last renewal runs out.
+WatchdogSec=20
 NotifyAccess=all
 WatchdogSignal=SIGKILL
 # A machine going down stops what it holds and passes the lease on before standby exits.

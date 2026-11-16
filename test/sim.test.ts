@@ -34,6 +34,7 @@ function world(seed: number, names: string[]) {
   }
   const machines = names.map<Machine>((name) => ({ name, frozenUntil: 0, cutUntil: 0, running: false, generation: 0, move: false, broken: false, tenureRuns: 0, renewed: 0 }))
   const log: string[] = []
+  const faults: string[] = []
   const say = (text: string) => log.push(`${(time / 1000).toFixed(1).padStart(8)}s ${text}`)
 
   /** A process that died never wakes: its timers are dropped. */
@@ -78,12 +79,21 @@ function world(seed: number, names: string[]) {
         sleep: (ms) => at(machine, ms),
         beat: () => `${machine.name}-${order++}`,
         beforeHold: () => at(machine, random() < 0.2 ? 40_000 : 0),
+        follow: async () => {},
+        ready: async () => {
+          await at(machine, random() * 300)
+          return random() < 0.7
+        },
         onChange: () => {},
         stopping: () => !alive(),
         moveAsked: () => (machine.move ? ((machine.move = false), random() < 0.5 ? "move" : "away") : false),
+        moveSignaled: () => at(machine, random() * 20_000),
         service: {
           async start(held) {
             if (!alive()) return
+            // A handoff is only ever the one the tenure before left as it stopped.
+            if (held.handoff !== undefined && held.handoff !== `last of ${held.from}` && held.handoff !== `last of ${held.tenure}`)
+              faults.push(`${machine.name} took tenure ${held.tenure} from ${held.from} with the handoff "${held.handoff}"`)
             machine.running = true
             machine.tenureRuns++
             machine.tenure = held.tenure
@@ -93,9 +103,11 @@ function world(seed: number, names: string[]) {
           // systemd runs jobs in order: a stop asked before the latest start doesn't undo it.
           async stop() {
             const run = machine.tenureRuns
+            const tenure = machine.tenure
             await at(machine, random() * 8000)
             if (alive() && run === machine.tenureRuns) machine.running = false
             say(`${machine.name} stopped`)
+            return `last of ${tenure}`
           },
           async kill(why) {
             if (alive()) machine.running = false
@@ -110,32 +122,34 @@ function world(seed: number, names: string[]) {
     ).catch((error) => say(`${machine.name} crashed: ${error}`))
   }
 
-  /** What systemd does when standby dies: the bound target stops, and standby starts again. */
-  function restart(machine: Machine) {
-    machine.generation++
-    machine.running = false
-    say(`${machine.name} restarts`)
-    timers.push({ at: time + 1000 + random() * 20_000, order: order++, machine, fire: () => boot(machine) })
-  }
-
   /**
-   * What systemd does when standby is restarted for an update: what it held keeps running, and the next run starts
-   * after up to 20s (TimeoutStartSec bounds a start that hangs, and ExecStopPost then fences).
+   * What systemd does when standby exits, crashed, killed by the watchdog or restarted for an update: what it held runs
+   * on, the next run starts after a moment (sometimes minutes, as when it fails to start) and renews it, and `standby
+   * lapse` stops it once the last renewal runs out. A frozen machine's systemd does nothing until it thaws.
    */
-  function update(machine: Machine) {
-    machine.generation++
-    say(`${machine.name} updates`)
-    const delay = random() < 0.2 ? random() * 20_000 : 200 + random() * 2000
+  function restart(machine: Machine, why = "restarts") {
+    if (time < machine.frozenUntil) return
+    const generation = ++machine.generation
+    say(`${machine.name} ${why}`)
+    const renewed = machine.renewed
+    const lapse = () => {
+      if (machine.renewed === renewed) machine.running = false
+    }
+    if (time >= renewed + (TTL * 2) / 3) lapse()
+    else timers.push({ at: renewed + (TTL * 2) / 3, order: order++, machine, fire: lapse })
+    const delay = random() < 0.1 ? 120_000 : random() < 0.2 ? random() * 20_000 : 200 + random() * 2000
     timers.push({
       at: time + delay,
       order: order++,
       machine,
+      generation,
       fire: () => {
         const within = machine.renewed + (TTL * 2) / 3 - time
         boot(machine, machine.running && machine.tenure !== undefined ? { inherited: { tenure: machine.tenure, within } } : {})
       },
     })
   }
+  const update = (machine: Machine) => restart(machine, "updates")
 
   const active = () => machines.filter((m) => m.running && time >= m.frozenUntil)
 
@@ -157,6 +171,7 @@ function world(seed: number, names: string[]) {
       if (next!.generation !== undefined && next!.generation !== next!.machine.generation) continue
       next!.fire()
       await new Promise((settle) => setImmediate(settle))
+      if (faults.length) throw new Error(`${faults.join("; ")}\n${log.slice(-30).join("\n")}`)
       if (chaos && time >= nextChaos) {
         nextChaos = time + random() * 120_000
         const machine = machines[Math.floor(random() * machines.length)]!
@@ -242,4 +257,17 @@ test("a retired lease stops its holder and no machine takes it", async () => {
   await w.until(w.time() + 600_000, false)
   expect(w.active()).toEqual([])
   expect(w.lease()?.retired).toBe(true)
+})
+
+test("a move waits for a waiter to claim the lease, and the taker gets the last transaction of the tenure before", async () => {
+  const w = world(3, ["server", "twin"])
+  await w.until(120_000, false)
+  const holder = w.active()[0]!
+  const { tenure } = w.lease()!
+  holder.move = true
+  await w.until(w.time() + 120_000, false)
+  const other = w.machines.find((m) => m !== holder)!
+  expect(w.active()).toEqual([other])
+  expect(w.lease()).toMatchObject({ holder: other.name, tenure: tenure + 1, from: tenure, handoff: `last of ${tenure}` })
+  expect(w.lease()?.free).toBeUndefined()
 })

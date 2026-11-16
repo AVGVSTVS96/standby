@@ -6,7 +6,10 @@ ConditionPathExists=%t/standby/held
 
 [Service]
 EnvironmentFile=%h/.config/standby.env
-EnvironmentFile=%t/standby/held
+# Optional only so ExecStopPost still runs once standby has removed it: without it the unit doesn't start.
+EnvironmentFile=-%t/standby/held
 ExecStart=litestream replicate -config %h/.local/share/standby/litestream.yml
+# Its last transaction goes to the next holder with the lease.
+ExecStopPost=%h/.local/share/standby/db-handoff ${DB} %t/standby/handoff
 Restart=always
 RestartSec=5

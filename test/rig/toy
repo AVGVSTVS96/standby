@@ -1,14 +1,20 @@
 #!/bin/sh
-# Stands in for hex: a row a second, with this machine's name, the tenure and a counter, also logged outside the machine.
-# 16 MB of padding makes a restore take a moment, like a real database.
+# Stands in for hex, waiting on a lock as long as hex does: a row every WRITE_EVERY seconds (1), with this machine's name, the tenure and a counter, also logged outside the machine.
+# PAD_MB of padding makes the database the size of a real one; CHURN_MB rewritten in every transaction makes each one
+# large, so a follower is often in the middle of writing one.
 set -eu
 [ ! -e "$HOME/broken" ] || { echo "toy: broken"; exit 1; }
 name=$(hostname)
-sqlite3 "$DB" "pragma journal_mode=wal; create table if not exists rows(n integer primary key, machine text, tenure int, at int);
-  create table if not exists pad(b); insert into pad select randomblob(16000000) where not exists (select 1 from pad);" >/dev/null
+sqlite3 -cmd ".timeout 30000" "$DB" "pragma journal_mode=wal; create table if not exists rows(n integer primary key, machine text, tenure int, at int);
+  create table if not exists churn(k integer primary key, n int, b blob);
+  create table if not exists pad(b); insert into pad select randomblob(${PAD_MB:-16} * 1000000) where not exists (select 1 from pad);" >/dev/null
+churn=$((${CHURN_MB:-0} * 100))
 while :; do
   at=$(date +%s%3N)
-  n=$(sqlite3 -cmd ".timeout 5000" "$DB" "insert into rows(machine, tenure, at) values('$name', $TENURE, $at) returning n;")
+  n=$(sqlite3 -cmd ".timeout 30000" "$DB" "begin; insert into rows(machine, tenure, at) values('$name', $TENURE, $at);
+    delete from churn; with recursive s(k) as (select 1 union all select k + 1 from s where k < $churn)
+    insert into churn select k, (select max(n) from rows), randomblob(10000) from s where $churn > 0;
+    select max(n) from rows; commit;")
   echo "$n $name $TENURE $at" >> "/rig/log/$name.rows"
-  sleep 1
+  sleep "${WRITE_EVERY:-1}"
 done

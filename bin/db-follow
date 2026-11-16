@@ -1,0 +1,40 @@
+#!/bin/sh
+# db-follow <database>: while another machine holds the lease, keeps a copy of the database it streams (tenure TENURE)
+# at <database>.follow-TENURE, fetching what's new every EVERY, or every NEAR_EVERY while this machine may take the
+# lease any moment (NEAR). Ready (systemd notify) once the copy is current; db-arrive makes it the database when this
+# machine takes over.
+set -eu
+db=$1 copy=$1.follow-$TENURE
+url="$REPLICA/$TENURE?endpoint=$ENDPOINT&region=auto"
+export LITESTREAM_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID LITESTREAM_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+# A copy of another tenure is of no use, and one without the transaction it's at can't be continued.
+for file in "$db".follow-*; do
+  case $file in "$copy" | "$copy-txid" | "$copy.tmp") ;; *) rm -f "$file" ;; esac
+done
+[ -f "$copy-txid" ] || rm -f "$copy"
+interval=$EVERY
+[ -z "${NEAR:-}" ] || interval=$NEAR_EVERY
+newest() { litestream ltx -level "$1" "$url" | awk 'NR > 1 && $3 > max { max = $3 } END { print max }'; }
+at() { if [ -f "$copy-txid" ]; then echo $((0x$(cat "$copy-txid"))); else echo -1; fi; }
+target=$(newest all)
+[ -n "$target" ] || { echo "db-follow: tenure $TENURE has nothing in the bucket yet"; exit 1; }
+litestream restore -f -follow-interval "$interval" -o "$copy" "$url" &
+follow=$!
+# Ready once the copy has what the bucket had at the start, and when NEAR, what it had a moment ago: a slow start leaves
+# it that far behind. The newest transactions are always in level 0.
+while :; do
+  until [ "$(at)" -ge $((0x$target)) ]; do
+    if ! kill -0 "$follow" 2>/dev/null; then
+      # It couldn't continue this copy (one the bucket's history has passed by): the next start makes a fresh one.
+      rm -f "$copy" "$copy-txid"
+      exit 1
+    fi
+    sleep 0.1
+  done
+  [ -n "${NEAR:-}" ] || break
+  latest=$(newest 0)
+  [ -n "$latest" ] && [ $((0x$latest)) -gt $((0x$target)) ] || break
+  target=$latest
+done
+systemd-notify --ready
+wait "$follow"

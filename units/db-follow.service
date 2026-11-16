@@ -1,0 +1,22 @@
+# Example: keeps a warm copy of the holder's database on every other machine, so a move here starts at once. Name it in
+# standby.env as FOLLOW; standby starts it while another machine holds the lease, with that tenure and whether this
+# machine may take over any moment in %t/standby/following, and its start completes once the copy is current.
+[Unit]
+Description=Keep a copy of the holder's database current
+ConditionPathExists=!%t/standby/held
+
+[Service]
+Type=notify
+NotifyAccess=all
+EnvironmentFile=%h/.config/standby.env
+EnvironmentFile=%t/standby/following
+# Each look at the bucket costs a request: a minute apart while waiting keeps it near free, a quarter second apart
+# while a move is near keeps the copy within a moment of the holder.
+Environment=EVERY=60s NEAR_EVERY=250ms
+ExecStart=/bin/sh -c 'exec %h/.local/share/standby/db-follow "$DB"'
+# db-arrive stops it holding a read lock on the copy, which a follower waiting to write never answers SIGTERM behind.
+KillSignal=SIGKILL
+Restart=always
+RestartSec=5
+# A first copy is a whole restore of the database.
+TimeoutStartSec=10min

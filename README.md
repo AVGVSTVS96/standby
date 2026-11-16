@@ -93,8 +93,8 @@ The follower needs Litestream with [#1606](https://github.com/benbjohnson/litest
 Each machine builds a tagged release into a folder of that version's own, somewhere nothing syncs, and the units name the version:
 
 ```sh
-git clone --depth 1 --branch v0.3.1 https://github.com/AVGVSTVS96/standby ~/.local/share/standby/v0.3.1
-cd ~/.local/share/standby/v0.3.1 && bun install && bun test && bun run build
+git clone --depth 1 --branch v0.3.2 https://github.com/AVGVSTVS96/standby ~/.local/share/standby/v0.3.2
+cd ~/.local/share/standby/v0.3.2 && bun install && bun test && bun run build
 ```
 
 A half-saved edit can't go live, and moving to a new version is a change of the path in `standby.service` and a restart, which leaves what the holder runs running.
